@@ -1,5 +1,5 @@
 <?php
-$required_params = array("destination_number", "destination_app", "destination_data");
+$required_params = array("destination_number", "destination_app");
 
 function do_action($body) {
     global $domain_uuid;
@@ -23,6 +23,20 @@ function do_action($body) {
     // Get destination type - default to "inbound"
     $destination_type = isset($body->destination_type) ? $body->destination_type : "inbound";
 
+    // Get destination_data and auto-append "XML domain_name" for transfer apps if not already present
+    $destination_data = isset($body->destination_data) ? $body->destination_data : '';
+    $dest_app = isset($body->destination_app) ? $body->destination_app : 'transfer';
+
+    // Normalize transfer app names - FreeSWITCH only understands "transfer"
+    // "transfer ivr", "transfer queue" etc. should all become "transfer"
+    if (strpos($dest_app, 'transfer') !== false) {
+        $dest_app = 'transfer';
+    }
+
+    if ($dest_app == 'transfer' && !empty($destination_data) && stripos($destination_data, 'XML') === false) {
+        $destination_data = $destination_data . ' XML ' . $domain_name;
+    }
+
     // Get enabled status
     $destination_enabled = isset($body->destination_enabled) ? $body->destination_enabled : "true";
 
@@ -33,8 +47,8 @@ function do_action($body) {
     // Build destination_actions JSON
     $destination_actions = array(
         array(
-            "destination_app" => $body->destination_app,
-            "destination_data" => $body->destination_data
+            "destination_app" => $dest_app,
+            "destination_data" => $destination_data
         )
     );
 
@@ -75,8 +89,8 @@ function do_action($body) {
     $parameters["destination_caller_id_number"] = isset($body->destination_caller_id_number) ? $body->destination_caller_id_number : null;
     $parameters["destination_cid_name_prefix"] = isset($body->destination_cid_name_prefix) ? $body->destination_cid_name_prefix : null;
     $parameters["destination_context"] = $context;
-    $parameters["destination_app"] = $body->destination_app;
-    $parameters["destination_data"] = $body->destination_data;
+    $parameters["destination_app"] = $dest_app;
+    $parameters["destination_data"] = $destination_data;
     $parameters["destination_actions"] = json_encode($destination_actions);
     $parameters["destination_enabled"] = $destination_enabled;
     $parameters["destination_description"] = isset($body->destination_description) ? $body->destination_description : null;
@@ -146,10 +160,10 @@ function do_action($body) {
     }
 
     // Action: main destination action (transfer, bridge, etc.)
-    insert_detail($dialplan_uuid, $dest_domain_uuid, 'action', $body->destination_app, $body->destination_data, 0, $detail_order += 10);
+    insert_detail($dialplan_uuid, $dest_domain_uuid, 'action', $dest_app, $destination_data, 0, $detail_order += 10);
 
     // Generate and save dialplan XML
-    $xml = generate_destination_xml($dialplan_uuid, $body->destination_number, $dest_domain_uuid, $domain_name, $destination_number_regex, $body->destination_app, $body->destination_data);
+    $xml = generate_destination_xml($dialplan_uuid, $body->destination_number, $dest_domain_uuid, $domain_name, $destination_number_regex, $dest_app, $destination_data);
     update_dialplan_xml($dialplan_uuid, $xml);
 
     // Clear cache and reload dialplan

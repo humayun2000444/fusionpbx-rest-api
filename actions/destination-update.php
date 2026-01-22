@@ -50,19 +50,42 @@ function do_action($body) {
     }
 
     if (isset($body->destination_app)) {
+        $app_value = $body->destination_app;
+        // Normalize transfer app names - FreeSWITCH only understands "transfer"
+        if (strpos($app_value, 'transfer') !== false) {
+            $app_value = 'transfer';
+        }
         $updates[] = "destination_app = :destination_app";
-        $parameters["destination_app"] = $body->destination_app;
+        $parameters["destination_app"] = $app_value;
     }
 
     if (isset($body->destination_data)) {
+        $dest_data_value = $body->destination_data;
+        // Auto-append "XML domain_name" for transfer apps if not already present
+        $current_app = isset($body->destination_app) ? $body->destination_app : $destination['destination_app'];
+        // Normalize transfer app names
+        if (strpos($current_app, 'transfer') !== false) {
+            $current_app = 'transfer';
+        }
+        if ($current_app == 'transfer' && !empty($dest_data_value) && stripos($dest_data_value, 'XML') === false) {
+            $dest_data_value = $dest_data_value . ' XML ' . $destination['domain_name'];
+        }
         $updates[] = "destination_data = :destination_data";
-        $parameters["destination_data"] = $body->destination_data;
+        $parameters["destination_data"] = $dest_data_value;
     }
 
     // Update destination_actions if app or data changed
     if (isset($body->destination_app) || isset($body->destination_data)) {
         $app = isset($body->destination_app) ? $body->destination_app : $destination['destination_app'];
-        $data = isset($body->destination_data) ? $body->destination_data : $destination['destination_data'];
+        // Normalize transfer app names - FreeSWITCH only understands "transfer"
+        if (strpos($app, 'transfer') !== false) {
+            $app = 'transfer';
+        }
+        $data = isset($body->destination_data) ? $dest_data_value : $destination['destination_data'];
+        // Auto-append "XML domain_name" for transfer apps if not already present
+        if ($app == 'transfer' && !empty($data) && stripos($data, 'XML') === false) {
+            $data = $data . ' XML ' . $destination['domain_name'];
+        }
         $destination_actions = array(
             array(
                 "destination_app" => $app,
@@ -157,7 +180,15 @@ function do_action($body) {
             // Get updated values
             $dest_number = isset($body->destination_number) ? $body->destination_number : $destination['destination_number'];
             $dest_app = isset($body->destination_app) ? $body->destination_app : $destination['destination_app'];
+            // Normalize transfer app names - FreeSWITCH only understands "transfer"
+            if (strpos($dest_app, 'transfer') !== false) {
+                $dest_app = 'transfer';
+            }
             $dest_data = isset($body->destination_data) ? $body->destination_data : $destination['destination_data'];
+            // Auto-append "XML domain_name" for transfer apps if not already present
+            if ($dest_app == 'transfer' && !empty($dest_data) && stripos($dest_data, 'XML') === false) {
+                $dest_data = $dest_data . ' XML ' . $destination['domain_name'];
+            }
             $dest_record = isset($body->destination_record) ? $body->destination_record : $destination['destination_record'];
             $domain_uuid = $destination['domain_uuid'];
             $domain_name = $destination['domain_name'];
