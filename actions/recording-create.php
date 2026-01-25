@@ -26,14 +26,16 @@ function do_action($body) {
     // Generate new UUID for recording
     $recording_uuid = uuid();
 
-    // Get recordings directory path
+    // Get recordings directory path from FusionPBX settings
     $settings = new settings(["domain_uuid" => $rec_domain_uuid]);
     $switch_recordings = $settings->get('switch', 'recordings', '/var/lib/freeswitch/recordings');
 
     // Create domain recordings directory if not exists
     $recording_dir = $switch_recordings . '/' . $domain_name;
     if (!is_dir($recording_dir)) {
-        mkdir($recording_dir, 0770, true);
+        if (!mkdir($recording_dir, 0770, true)) {
+            return array("error" => "Failed to create recordings directory: " . $recording_dir);
+        }
     }
 
     // Sanitize filename
@@ -58,42 +60,75 @@ function do_action($body) {
     }
 
     if (file_put_contents($file_path, $file_content) === false) {
-        return array("error" => "Failed to save recording file");
+        return array("error" => "Failed to save recording file to: " . $file_path);
     }
 
     // Set proper permissions
     chmod($file_path, 0664);
 
-    // Insert into database
-    $sql = "INSERT INTO v_recordings (
-                recording_uuid,
-                domain_uuid,
-                recording_filename,
-                recording_name,
-                recording_description,
-                insert_date,
-                insert_user
-            ) VALUES (
-                :recording_uuid,
-                :domain_uuid,
-                :recording_filename,
-                :recording_name,
-                :recording_description,
-                NOW(),
-                :insert_user
-            )";
+    // Get recording name and description
+    $recording_name = $body->recording_name;
+    $recording_description = isset($body->recording_description) ? $body->recording_description : '';
 
-    $parameters = array(
-        "recording_uuid" => $recording_uuid,
-        "domain_uuid" => $rec_domain_uuid,
-        "recording_filename" => $recording_filename,
-        "recording_name" => $body->recording_name,
-        "recording_description" => isset($body->recording_description) ? $body->recording_description : null,
-        "insert_user" => isset($_SESSION['username']) ? $_SESSION['username'] : 'api'
-    );
+    // Insert into database using FusionPBX ORM (same as recording_edit.php)
+    $array['recordings'][0]['domain_uuid'] = $rec_domain_uuid;
+    $array['recordings'][0]['recording_uuid'] = $recording_uuid;
+    $array['recordings'][0]['recording_filename'] = $recording_filename;
+    $array['recordings'][0]['recording_name'] = $recording_name;
+    $array['recordings'][0]['recording_description'] = $recording_description;
 
+    // Execute insert using database class
     $database = new database;
-    $database->execute($sql, $parameters);
+    $database->app_name = 'recordings';
+    $database->app_uuid = '83913217-c7a2-9e90-925d-a866eb40b60e';
+    $database->save($array);
+    unset($array);
+
+    // Verify the insert worked
+    $sql = "SELECT recording_uuid FROM v_recordings WHERE recording_uuid = :recording_uuid";
+    $parameters = array("recording_uuid" => $recording_uuid);
+    $database = new database;
+    $verify = $database->select($sql, $parameters, "row");
+
+    if (!$verify) {
+        // Try direct SQL insert as fallback
+        $sql = "INSERT INTO v_recordings (
+                    recording_uuid,
+                    domain_uuid,
+                    recording_filename,
+                    recording_name,
+                    recording_description
+                ) VALUES (
+                    :recording_uuid,
+                    :domain_uuid,
+                    :recording_filename,
+                    :recording_name,
+                    :recording_description
+                )";
+        $parameters = array(
+            "recording_uuid" => $recording_uuid,
+            "domain_uuid" => $rec_domain_uuid,
+            "recording_filename" => $recording_filename,
+            "recording_name" => $recording_name,
+            "recording_description" => $recording_description
+        );
+        $database = new database;
+        $database->execute($sql, $parameters);
+
+        // Verify again
+        $sql = "SELECT recording_uuid FROM v_recordings WHERE recording_uuid = :recording_uuid";
+        $parameters = array("recording_uuid" => $recording_uuid);
+        $database = new database;
+        $verify = $database->select($sql, $parameters, "row");
+
+        if (!$verify) {
+            // Clean up the file if DB insert failed
+            if (file_exists($file_path)) {
+                unlink($file_path);
+            }
+            return array("error" => "Failed to insert recording into database");
+        }
+    }
 
     // Return success with recording info
     return array(
@@ -101,7 +136,7 @@ function do_action($body) {
         "message" => "Recording created successfully",
         "recording_uuid" => $recording_uuid,
         "recording_filename" => $recording_filename,
-        "recording_name" => $body->recording_name,
+        "recording_name" => $recording_name,
         "domain_uuid" => $rec_domain_uuid,
         "domain_name" => $domain_name,
         "file_path" => $file_path,
