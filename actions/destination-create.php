@@ -166,19 +166,51 @@ function do_action($body) {
     $xml = generate_destination_xml($dialplan_uuid, $body->destination_number, $dest_domain_uuid, $domain_name, $destination_number_regex, $dest_app, $destination_data);
     update_dialplan_xml($dialplan_uuid, $xml);
 
+    // Get dialplan_mode setting
+    $dialplan_mode = 'multiple';
+    $sql = "SELECT default_setting_value FROM v_default_settings
+            WHERE default_setting_category = 'destinations'
+            AND default_setting_subcategory = 'dialplan_mode'";
+    $mode_result = $database->select($sql, null, "row");
+    if ($mode_result && !empty($mode_result['default_setting_value'])) {
+        $dialplan_mode = $mode_result['default_setting_value'];
+    }
+
     // Clear cache and reload dialplan
     $reload_output = "";
     $reload_success = false;
+    $cache_cleared = array();
+
+    if (class_exists('cache')) {
+        $cache = new cache;
+
+        if ($dialplan_mode == 'multiple') {
+            // Clear the entire context cache
+            $cache->delete("dialplan:" . $context);
+            $cache_cleared[] = "dialplan:" . $context;
+        }
+
+        if ($dialplan_mode == 'single') {
+            // Clear specific destination number cache (like FusionPBX does)
+            $dest_num = $body->destination_number;
+
+            // Clear with and without + prefix
+            $cache->delete("dialplan:" . $context . ":" . $dest_num);
+            $cache_cleared[] = "dialplan:" . $context . ":" . $dest_num;
+
+            $cache->delete("dialplan:" . $context . ":+" . $dest_num);
+            $cache_cleared[] = "dialplan:" . $context . ":+" . $dest_num;
+
+            // If number starts with +, also clear that variant
+            if (substr($dest_num, 0, 1) == '+') {
+                $cache->delete("dialplan:" . $context . ":" . $dest_num);
+            }
+        }
+    }
 
     if (class_exists('event_socket')) {
         $esl = event_socket::create();
         if ($esl) {
-            // Clear dialplan cache
-            if (class_exists('cache')) {
-                $cache = new cache;
-                $cache->delete("dialplan:" . $context);
-            }
-
             // Reload XML
             $reload_output = event_socket::api('reloadxml');
             $reload_success = true;

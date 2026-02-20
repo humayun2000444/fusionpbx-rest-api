@@ -219,18 +219,47 @@ function do_action($body) {
         }
     }
 
+    // Get dialplan_mode setting
+    $dialplan_mode = 'multiple';
+    $sql = "SELECT default_setting_value FROM v_default_settings
+            WHERE default_setting_category = 'destinations'
+            AND default_setting_subcategory = 'dialplan_mode'";
+    $mode_result = $database->select($sql, null, "row");
+    if ($mode_result && !empty($mode_result['default_setting_value'])) {
+        $dialplan_mode = $mode_result['default_setting_value'];
+    }
+
     // Clear cache and reload dialplan
     $reload_output = "";
     $reload_success = false;
     $context = isset($body->destination_context) ? $body->destination_context : $destination['destination_context'];
+    $dest_number = isset($body->destination_number) ? $body->destination_number : $destination['destination_number'];
+    $old_dest_number = $destination['destination_number'];
+
+    if (class_exists('cache')) {
+        $cache = new cache;
+
+        if ($dialplan_mode == 'multiple') {
+            // Clear the entire context cache
+            $cache->delete("dialplan:" . $context);
+        }
+
+        if ($dialplan_mode == 'single') {
+            // Clear old destination number cache
+            $cache->delete("dialplan:" . $context . ":" . $old_dest_number);
+            $cache->delete("dialplan:" . $context . ":+" . $old_dest_number);
+
+            // Clear new destination number cache (if changed)
+            if ($dest_number != $old_dest_number) {
+                $cache->delete("dialplan:" . $context . ":" . $dest_number);
+                $cache->delete("dialplan:" . $context . ":+" . $dest_number);
+            }
+        }
+    }
 
     if (class_exists('event_socket')) {
         $esl = event_socket::create();
         if ($esl) {
-            if (class_exists('cache')) {
-                $cache = new cache;
-                $cache->delete("dialplan:" . $context);
-            }
             $reload_output = event_socket::api('reloadxml');
             $reload_success = true;
         }
