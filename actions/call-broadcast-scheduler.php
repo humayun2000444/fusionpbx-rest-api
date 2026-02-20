@@ -217,19 +217,27 @@ function start_broadcast($broadcast, $database) {
         $delay = $start_time + ($batch_number * $timeout);
 
         // Build originate command based on destination type
+        // origination_caller_id = what called party sees (company number)
+        // caller_id = what shows in queue (the destination number being dialed - both Name and Number)
+        // Use ^^: prefix to export variables through all legs
+        $common_vars = "^^:origination_caller_id_name='$caller_id_name':origination_caller_id_number='$caller_id_number':caller_id_number='$phone_number':caller_id_name='$phone_number':effective_caller_id_number='$phone_number':effective_caller_id_name='$phone_number':destination_number='$phone_number':accountcode='$accountcode':domain_uuid='$domain_uuid':domain_name='$domain_name':call_broadcast_uuid='$call_broadcast_uuid'";
+
+        // Add AMD if enabled - use silence detection to filter machines
+        if ($avmd) {
+            // wait_for_silence: threshold silence_hits listen_hits timeout_ms
+            // Human: says "Hello?" then silence (detected quickly)
+            // Machine: long greeting (times out)
+            $common_vars .= ":execute_on_answer='wait_for_silence 200 25 3 4000'";
+        }
+
         if ($destination_type === 'queue') {
             // Route to call center queue
             $parts = explode(' ', $destination_data);
             $queue_extension = $parts[0];
-            $originate_cmd = "originate {origination_caller_id_name='$caller_id_name',origination_caller_id_number='$caller_id_number',accountcode='$accountcode',domain_uuid='$domain_uuid',domain_name='$domain_name',call_broadcast_uuid='$call_broadcast_uuid'}sofia/gateway/BTCL/$phone_number &transfer($queue_extension XML $domain_name)";
+            $originate_cmd = "originate {" . $common_vars . "}sofia/gateway/BTCL/$phone_number &transfer($queue_extension XML $domain_name)";
         } else {
             // Transfer to extension/dialplan
-            $originate_cmd = "originate {origination_caller_id_name='$caller_id_name',origination_caller_id_number='$caller_id_number',accountcode='$accountcode',domain_uuid='$domain_uuid',domain_name='$domain_name',call_broadcast_uuid='$call_broadcast_uuid'}sofia/gateway/BTCL/$phone_number &transfer($destination_data)";
-        }
-
-        // Add AMD if enabled
-        if ($avmd) {
-            $originate_cmd = str_replace('}', ',execute_on_answer=avmd_start}', $originate_cmd);
+            $originate_cmd = "originate {" . $common_vars . "}sofia/gateway/BTCL/$phone_number &transfer($destination_data)";
         }
 
         // Schedule the call

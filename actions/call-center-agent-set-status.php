@@ -37,9 +37,17 @@ function do_action($body) {
     $esl = event_socket::create();
 
     $esl_result = null;
+    $state_result = null;
     if ($esl) {
+        // Set agent status
         $cmd = "callcenter_config agent set status $agent_uuid '$status'";
         $esl_result = event_socket::api($cmd);
+
+        // If agent is Available, also set state to Waiting so they receive calls
+        if (strpos($status, 'Available') !== false) {
+            $state_cmd = "callcenter_config agent set state $agent_uuid Waiting";
+            $state_result = event_socket::api($state_cmd);
+        }
     }
 
     return array(
@@ -48,6 +56,7 @@ function do_action($body) {
         "agentName" => $agent['agent_name'],
         "previousStatus" => $agent['agent_status'],
         "newStatus" => $status,
-        "eslResult" => $esl_result ? trim($esl_result) : "Event socket not available"
+        "eslResult" => $esl_result ? trim($esl_result) : "Event socket not available",
+        "stateResult" => $state_result ? trim($state_result) : null
     );
 }
