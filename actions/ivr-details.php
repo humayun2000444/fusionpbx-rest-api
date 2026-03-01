@@ -1,0 +1,84 @@
+<?php
+$required_params = array("ivr_menu_uuid");
+
+function do_action($body) {
+    // Get IVR menu details
+    $sql = "SELECT
+                m.ivr_menu_uuid,
+                m.ivr_menu_name,
+                m.ivr_menu_extension,
+                m.ivr_menu_greet_long,
+                m.ivr_menu_greet_short,
+                m.ivr_menu_timeout,
+                m.ivr_menu_exit_app,
+                m.ivr_menu_exit_data,
+                m.ivr_menu_direct_dial,
+                m.ivr_menu_ringback,
+                m.ivr_menu_cid_prefix,
+                m.ivr_menu_language,
+                m.ivr_menu_description,
+                m.ivr_menu_enabled,
+                m.domain_uuid,
+                d.domain_name
+            FROM v_ivr_menus m
+            LEFT JOIN v_domains d ON m.domain_uuid = d.domain_uuid
+            WHERE m.ivr_menu_uuid = :ivr_menu_uuid";
+    $parameters = array("ivr_menu_uuid" => $body->ivr_menu_uuid);
+
+    $database = new database;
+    $menu = $database->select($sql, $parameters, "row");
+
+    if (!$menu) {
+        return array("error" => "IVR menu not found");
+    }
+
+    // Get options for this menu
+    $options_sql = "SELECT
+                        ivr_menu_option_uuid,
+                        ivr_menu_option_digits,
+                        ivr_menu_option_action,
+                        ivr_menu_option_param,
+                        ivr_menu_option_order,
+                        ivr_menu_option_description,
+                        ivr_menu_option_enabled
+                    FROM v_ivr_menu_options
+                    WHERE ivr_menu_uuid = :ivr_menu_uuid
+                    ORDER BY ivr_menu_option_order ASC, ivr_menu_option_digits ASC";
+    $options_params = array("ivr_menu_uuid" => $body->ivr_menu_uuid);
+    $options = $database->select($options_sql, $options_params, "all");
+
+    $formatted_options = array();
+    if ($options) {
+        foreach ($options as $opt) {
+            $formatted_options[] = array(
+                "option_uuid" => $opt['ivr_menu_option_uuid'],
+                "digits" => $opt['ivr_menu_option_digits'],
+                "action" => $opt['ivr_menu_option_action'],
+                "param" => $opt['ivr_menu_option_param'],
+                "order" => intval($opt['ivr_menu_option_order']),
+                "description" => $opt['ivr_menu_option_description'],
+                "enabled" => $opt['ivr_menu_option_enabled']
+            );
+        }
+    }
+
+    return array(
+        "ivr_menu_uuid" => $menu['ivr_menu_uuid'],
+        "name" => $menu['ivr_menu_name'],
+        "extension" => $menu['ivr_menu_extension'],
+        "greet_long" => $menu['ivr_menu_greet_long'],
+        "greet_short" => $menu['ivr_menu_greet_short'],
+        "timeout" => intval($menu['ivr_menu_timeout']),
+        "exit_app" => $menu['ivr_menu_exit_app'],
+        "exit_data" => $menu['ivr_menu_exit_data'],
+        "direct_dial" => $menu['ivr_menu_direct_dial'],
+        "ringback" => $menu['ivr_menu_ringback'],
+        "caller_id_prefix" => $menu['ivr_menu_cid_prefix'],
+        "language" => $menu['ivr_menu_language'],
+        "description" => $menu['ivr_menu_description'],
+        "enabled" => $menu['ivr_menu_enabled'],
+        "domain_uuid" => $menu['domain_uuid'],
+        "domain_name" => $menu['domain_name'],
+        "options" => $formatted_options
+    );
+}
