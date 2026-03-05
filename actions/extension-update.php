@@ -1,5 +1,5 @@
 <?php
-$required_params = array("extension_uuid");
+$required_params = array("extensionUuid");
 
 function do_action($body) {
     global $domain_uuid;
