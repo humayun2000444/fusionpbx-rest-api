@@ -27,12 +27,18 @@ function do_action($body) {
     $destination_data = isset($body->destination_data) ? $body->destination_data : '';
     $dest_app = isset($body->destination_app) ? $body->destination_app : 'transfer';
 
-    // Normalize transfer app names - FreeSWITCH only understands "transfer"
-    // "transfer ivr", "transfer queue" etc. should all become "transfer"
+    // Normalize app names - FreeSWITCH uses "transfer" for most routing
+    // "transfer ivr", "transfer queue", "ring-group", "ivr", "queue" etc. should all become "transfer"
+    $transfer_apps = array('transfer', 'ring-group', 'ring_group', 'ivr', 'queue', 'voicemail', 'extension');
+    $original_app = $dest_app;
+
     if (strpos($dest_app, 'transfer') !== false) {
+        $dest_app = 'transfer';
+    } elseif (in_array(strtolower($dest_app), $transfer_apps)) {
         $dest_app = 'transfer';
     }
 
+    // Add XML domain_name suffix for transfer apps if not already present
     if ($dest_app == 'transfer' && !empty($destination_data) && stripos($destination_data, 'XML') === false) {
         $destination_data = $destination_data . ' XML ' . $domain_name;
     }

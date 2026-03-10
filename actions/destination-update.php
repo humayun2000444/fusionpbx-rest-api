@@ -49,10 +49,13 @@ function do_action($body) {
         $parameters["destination_caller_id_number"] = $body->destination_caller_id_number;
     }
 
+    // Helper: Normalize app names - FreeSWITCH uses "transfer" for most routing
+    $transfer_apps = array('transfer', 'ring-group', 'ring_group', 'ivr', 'queue', 'voicemail', 'extension');
+
     if (isset($body->destination_app)) {
         $app_value = $body->destination_app;
-        // Normalize transfer app names - FreeSWITCH only understands "transfer"
-        if (strpos($app_value, 'transfer') !== false) {
+        // Normalize app names
+        if (strpos($app_value, 'transfer') !== false || in_array(strtolower($app_value), $transfer_apps)) {
             $app_value = 'transfer';
         }
         $updates[] = "destination_app = :destination_app";
@@ -63,8 +66,8 @@ function do_action($body) {
         $dest_data_value = $body->destination_data;
         // Auto-append "XML domain_name" for transfer apps if not already present
         $current_app = isset($body->destination_app) ? $body->destination_app : $destination['destination_app'];
-        // Normalize transfer app names
-        if (strpos($current_app, 'transfer') !== false) {
+        // Normalize app names
+        if (strpos($current_app, 'transfer') !== false || in_array(strtolower($current_app), $transfer_apps)) {
             $current_app = 'transfer';
         }
         if ($current_app == 'transfer' && !empty($dest_data_value) && stripos($dest_data_value, 'XML') === false) {
@@ -77,8 +80,8 @@ function do_action($body) {
     // Update destination_actions if app or data changed
     if (isset($body->destination_app) || isset($body->destination_data)) {
         $app = isset($body->destination_app) ? $body->destination_app : $destination['destination_app'];
-        // Normalize transfer app names - FreeSWITCH only understands "transfer"
-        if (strpos($app, 'transfer') !== false) {
+        // Normalize app names
+        if (strpos($app, 'transfer') !== false || in_array(strtolower($app), $transfer_apps)) {
             $app = 'transfer';
         }
         $data = isset($body->destination_data) ? $dest_data_value : $destination['destination_data'];
@@ -180,8 +183,8 @@ function do_action($body) {
             // Get updated values
             $dest_number = isset($body->destination_number) ? $body->destination_number : $destination['destination_number'];
             $dest_app = isset($body->destination_app) ? $body->destination_app : $destination['destination_app'];
-            // Normalize transfer app names - FreeSWITCH only understands "transfer"
-            if (strpos($dest_app, 'transfer') !== false) {
+            // Normalize app names - FreeSWITCH uses "transfer" for most routing
+            if (strpos($dest_app, 'transfer') !== false || in_array(strtolower($dest_app), $transfer_apps)) {
                 $dest_app = 'transfer';
             }
             $dest_data = isset($body->destination_data) ? $body->destination_data : $destination['destination_data'];
