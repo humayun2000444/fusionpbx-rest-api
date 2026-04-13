@@ -127,7 +127,7 @@ function do_action($body) {
             //   origination_caller_id = what called party sees (company caller ID)
             //   caller_id = what shows in call center queue (destination number being called)
             // Use ^^: prefix to export variables through all legs including loopback
-            $channel_variables = "^^:ignore_early_media=true";
+            $channel_variables = "^^:ignore_early_media=true:ignore_display_updates=true:sip_cid_type=none";
             $channel_variables .= ":origination_number=" . $phone_number;
             $channel_variables .= ":destination_number=" . $phone_number;
             $channel_variables .= ":origination_caller_id_name='" . $broadcast_caller_id_name . "'";
