@@ -13,10 +13,10 @@ function snakeToCamel($input) {
 function ensure_parameters($body, $required) {
     $missing = array();
     foreach($required as $param) {
-        // Check camelCase version
-        $camelParam = $param;
         // Check snake_case version
         $snakeParam = camelToSnake($param);
+        // Check camelCase version
+        $camelParam = snakeToCamel($param);
         
         $hasCamel = isset($body->{$camelParam}) && $body->{$camelParam} !== "";
         $hasSnake = isset($body->{$snakeParam}) && $body->{$snakeParam} !== "";
