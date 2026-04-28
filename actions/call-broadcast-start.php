@@ -109,11 +109,59 @@ function do_action($body) {
         );
     }
 
+    // Retry settings
+    $retry_enabled = isset($broadcast['broadcast_retry_enabled']) && $broadcast['broadcast_retry_enabled'] === 'true';
+    $retry_max = isset($broadcast['broadcast_retry_max']) ? intval($broadcast['broadcast_retry_max']) : 0;
+    $max_attempts = $retry_enabled ? ($retry_max + 1) : 1; // +1 for initial attempt
+
     // Parse phone numbers
     $phone_numbers = array_filter(explode("\n", trim($broadcast['broadcast_phone_numbers'])));
     $sched_seconds = $broadcast_start_time;
     $count = 1;
     $scheduled_calls = 0;
+
+    // Insert leads into tracking table (skip duplicates)
+    foreach ($phone_numbers as $phone_line) {
+        $phone_line_clean = str_replace(";", "|", $phone_line);
+        $phone_parts_clean = explode("|", $phone_line_clean);
+        $phone_clean = preg_replace('/\D/', '', trim($phone_parts_clean[0]));
+        if (!empty($phone_clean) && is_numeric($phone_clean)) {
+            // Check if lead already exists for this broadcast
+            $check_sql = "SELECT call_broadcast_lead_uuid FROM v_call_broadcast_leads
+                          WHERE call_broadcast_uuid = :broadcast_uuid AND phone_number = :phone";
+            $existing = $database->select($check_sql, array(
+                "broadcast_uuid" => $call_broadcast_uuid,
+                "phone" => $phone_clean
+            ), "row");
+
+            if (empty($existing)) {
+                $lead_uuid = uuid();
+                $insert_lead_sql = "INSERT INTO v_call_broadcast_leads
+                    (call_broadcast_lead_uuid, call_broadcast_uuid, domain_uuid, phone_number, lead_status, attempts, max_attempts, insert_date)
+                    VALUES (:lead_uuid, :broadcast_uuid, :domain_uuid, :phone, 'pending', 0, :max_attempts, NOW())";
+                try {
+                    $database->execute($insert_lead_sql, array(
+                        "lead_uuid" => $lead_uuid,
+                        "broadcast_uuid" => $call_broadcast_uuid,
+                        "domain_uuid" => $db_domain_uuid,
+                        "phone" => $phone_clean,
+                        "max_attempts" => $max_attempts
+                    ));
+                } catch (Exception $e) {
+                    // Skip duplicate or error, continue
+                }
+            } else {
+                // Reset existing lead for re-run
+                $reset_sql = "UPDATE v_call_broadcast_leads SET lead_status = 'pending', attempts = 0,
+                              max_attempts = :max_attempts, hangup_cause = NULL, next_retry_at = NULL, update_date = NOW()
+                              WHERE call_broadcast_lead_uuid = :lead_uuid";
+                $database->execute($reset_sql, array(
+                    "lead_uuid" => $existing['call_broadcast_lead_uuid'],
+                    "max_attempts" => $max_attempts
+                ));
+            }
+        }
+    }
 
     foreach ($phone_numbers as $phone_line) {
         // Parse phone number (may contain other data separated by | or ;)
@@ -141,6 +189,7 @@ function do_action($body) {
             $channel_variables .= ":domain=" . $db_domain_name;
             $channel_variables .= ":domain_name=" . $db_domain_name;
             $channel_variables .= ":accountcode='" . $broadcast_accountcode . "'";
+            $channel_variables .= ":call_broadcast_uuid=" . $call_broadcast_uuid;
 
             if (!empty($broadcast_toll_allow)) {
                 $channel_variables .= ":toll_allow='" . $broadcast_toll_allow . "'";
@@ -180,6 +229,19 @@ function do_action($body) {
 
             @event_socket::command($cmd);
             $scheduled_calls++;
+
+            // Update lead status to 'calling'
+            $update_lead_sql = "UPDATE v_call_broadcast_leads SET lead_status = 'calling',
+                                attempts = attempts + 1, last_attempt_at = NOW(), update_date = NOW()
+                                WHERE call_broadcast_uuid = :broadcast_uuid AND phone_number = :phone AND lead_status IN ('pending', 'retry_pending')";
+            try {
+                $database->execute($update_lead_sql, array(
+                    "broadcast_uuid" => $call_broadcast_uuid,
+                    "phone" => $phone_number
+                ));
+            } catch (Exception $e) {
+                // non-critical, continue
+            }
 
             // Spread calls out based on concurrent limit
             if ($broadcast_concurrent_limit > 0 && $broadcast_timeout > 0) {

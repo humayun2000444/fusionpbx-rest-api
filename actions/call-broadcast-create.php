@@ -53,6 +53,49 @@ function do_action($body) {
     $broadcast_accountcode = isset($body->broadcastAccountcode) ? $body->broadcastAccountcode :
                             (isset($body->broadcast_accountcode) ? $body->broadcast_accountcode : $domain_name);
 
+    // Schedule parameters
+    $schedule_enabled = isset($body->scheduleEnabled) ? ($body->scheduleEnabled === true || $body->scheduleEnabled === 'true') :
+                       (isset($body->schedule_enabled) ? ($body->schedule_enabled === true || $body->schedule_enabled === 'true') : false);
+
+    $schedule_type = isset($body->scheduleType) ? $body->scheduleType :
+                    (isset($body->schedule_type) ? $body->schedule_type : 'one_time');
+
+    $schedule_date = isset($body->scheduleDate) ? $body->scheduleDate :
+                    (isset($body->schedule_date) ? $body->schedule_date : null);
+
+    $schedule_time = isset($body->scheduleTime) ? $body->scheduleTime :
+                    (isset($body->schedule_time) ? $body->schedule_time : null);
+
+    $schedule_days = isset($body->scheduleDays) ? $body->scheduleDays :
+                    (isset($body->schedule_days) ? $body->schedule_days : null);
+
+    // Handle schedule_days as array
+    if (is_array($schedule_days)) {
+        $schedule_days = implode(',', $schedule_days);
+    }
+
+    $schedule_end_date = isset($body->scheduleEndDate) ? $body->scheduleEndDate :
+                        (isset($body->schedule_end_date) ? $body->schedule_end_date : null);
+
+    // Retry parameters
+    $retry_enabled = isset($body->retryEnabled) ? ($body->retryEnabled === true || $body->retryEnabled === 'true') :
+                    (isset($body->retry_enabled) ? ($body->retry_enabled === true || $body->retry_enabled === 'true') : false);
+
+    $retry_max = isset($body->retryMax) ? intval($body->retryMax) :
+                (isset($body->retry_max) ? intval($body->retry_max) : 0);
+
+    $retry_interval = isset($body->retryInterval) ? intval($body->retryInterval) :
+                     (isset($body->retry_interval) ? intval($body->retry_interval) : 300);
+
+    $retry_causes = isset($body->retryCauses) ? $body->retryCauses :
+                   (isset($body->retry_causes) ? $body->retry_causes :
+                   'NO_ANSWER,ORIGINATOR_CANCEL,USER_BUSY,NO_USER_RESPONSE,CALL_REJECTED,NORMAL_TEMPORARY_FAILURE');
+
+    // Handle retry_causes as array
+    if (is_array($retry_causes)) {
+        $retry_causes = implode(',', $retry_causes);
+    }
+
     // Handle phone numbers as array or string
     if (is_array($broadcast_phone_numbers)) {
         $broadcast_phone_numbers = implode("\n", $broadcast_phone_numbers);
@@ -63,59 +106,94 @@ function do_action($body) {
 
     $database = new database;
 
-    // Insert broadcast
-    $sql = "INSERT INTO v_call_broadcasts (
-                call_broadcast_uuid,
-                domain_uuid,
-                broadcast_name,
-                broadcast_description,
-                broadcast_start_time,
-                broadcast_timeout,
-                broadcast_concurrent_limit,
-                broadcast_caller_id_name,
-                broadcast_caller_id_number,
-                broadcast_destination_type,
-                broadcast_destination_data,
-                broadcast_phone_numbers,
-                broadcast_avmd,
-                broadcast_accountcode,
-                insert_date
-            ) VALUES (
-                :call_broadcast_uuid,
-                :domain_uuid,
-                :broadcast_name,
-                :broadcast_description,
-                :broadcast_start_time,
-                :broadcast_timeout,
-                :broadcast_concurrent_limit,
-                :broadcast_caller_id_name,
-                :broadcast_caller_id_number,
-                :broadcast_destination_type,
-                :broadcast_destination_data,
-                :broadcast_phone_numbers,
-                :broadcast_avmd,
-                :broadcast_accountcode,
-                NOW()
-            )";
+    // Build dynamic SQL with only non-null values
+    $columns = array(
+        "call_broadcast_uuid", "domain_uuid", "broadcast_name",
+        "broadcast_start_time", "broadcast_timeout", "broadcast_concurrent_limit",
+        "broadcast_caller_id_name", "broadcast_caller_id_number",
+        "broadcast_destination_type", "broadcast_avmd",
+        "broadcast_schedule_enabled", "broadcast_schedule_type",
+        "broadcast_status", "insert_date"
+    );
+
+    $values = array(
+        ":call_broadcast_uuid", ":domain_uuid", ":broadcast_name",
+        ":broadcast_start_time", ":broadcast_timeout", ":broadcast_concurrent_limit",
+        ":broadcast_caller_id_name", ":broadcast_caller_id_number",
+        ":broadcast_destination_type", ":broadcast_avmd",
+        ":broadcast_schedule_enabled", ":broadcast_schedule_type",
+        "'idle'", "NOW()"
+    );
 
     $parameters = array(
         "call_broadcast_uuid" => $call_broadcast_uuid,
         "domain_uuid" => $db_domain_uuid,
         "broadcast_name" => $broadcast_name,
-        "broadcast_description" => $broadcast_description,
         "broadcast_start_time" => $broadcast_start_time,
         "broadcast_timeout" => $broadcast_timeout,
         "broadcast_concurrent_limit" => $broadcast_concurrent_limit,
         "broadcast_caller_id_name" => $broadcast_caller_id_name,
         "broadcast_caller_id_number" => $broadcast_caller_id_number,
         "broadcast_destination_type" => $broadcast_destination_type,
-        "broadcast_destination_data" => $broadcast_destination_data,
-        "broadcast_phone_numbers" => $broadcast_phone_numbers,
         "broadcast_avmd" => $broadcast_avmd,
-        "broadcast_accountcode" => $broadcast_accountcode
+        "broadcast_schedule_enabled" => $schedule_enabled ? 'true' : 'false',
+        "broadcast_schedule_type" => $schedule_type
     );
 
-    $database->execute($sql, $parameters);
+    // Add optional fields only if they have values
+    $optional_fields = array(
+        "broadcast_description" => $broadcast_description,
+        "broadcast_destination_data" => $broadcast_destination_data,
+        "broadcast_phone_numbers" => $broadcast_phone_numbers,
+        "broadcast_accountcode" => $broadcast_accountcode,
+        "broadcast_schedule_date" => $schedule_date,
+        "broadcast_schedule_time" => $schedule_time,
+        "broadcast_schedule_days" => $schedule_days,
+        "broadcast_schedule_end_date" => $schedule_end_date,
+        "broadcast_retry_causes" => $retry_causes
+    );
+
+    // Always add retry fields (they have defaults)
+    $columns[] = "broadcast_retry_enabled";
+    $values[] = ":broadcast_retry_enabled";
+    $parameters["broadcast_retry_enabled"] = $retry_enabled ? 'true' : 'false';
+
+    $columns[] = "broadcast_retry_max";
+    $values[] = ":broadcast_retry_max";
+    $parameters["broadcast_retry_max"] = $retry_max;
+
+    $columns[] = "broadcast_retry_interval";
+    $values[] = ":broadcast_retry_interval";
+    $parameters["broadcast_retry_interval"] = $retry_interval;
+
+    foreach ($optional_fields as $field => $value) {
+        if (!empty($value)) {
+            $columns[] = $field;
+            $values[] = ":" . $field;
+            $parameters[$field] = $value;
+        }
+    }
+
+    $sql = "INSERT INTO v_call_broadcasts (" . implode(", ", $columns) . ") VALUES (" . implode(", ", $values) . ")";
+
+    try {
+        $database->execute($sql, $parameters);
+    } catch (Exception $e) {
+        return array(
+            "success" => false,
+            "error" => "Failed to create broadcast: " . $e->getMessage()
+        );
+    }
+
+    // Verify the broadcast was actually created
+    $verify_sql = "SELECT call_broadcast_uuid FROM v_call_broadcasts WHERE call_broadcast_uuid = :call_broadcast_uuid";
+    $verify_result = $database->select($verify_sql, array("call_broadcast_uuid" => $call_broadcast_uuid), "row");
+    if (empty($verify_result)) {
+        return array(
+            "success" => false,
+            "error" => "Broadcast creation failed - database insert did not succeed"
+        );
+    }
 
     return array(
         "success" => true,

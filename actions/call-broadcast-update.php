@@ -68,7 +68,29 @@ function do_action($body) {
         "broadcastAvmd" => "broadcast_avmd",
         "broadcast_avmd" => "broadcast_avmd",
         "broadcastAccountcode" => "broadcast_accountcode",
-        "broadcast_accountcode" => "broadcast_accountcode"
+        "broadcast_accountcode" => "broadcast_accountcode",
+        // Schedule fields
+        "scheduleEnabled" => "broadcast_schedule_enabled",
+        "schedule_enabled" => "broadcast_schedule_enabled",
+        "scheduleType" => "broadcast_schedule_type",
+        "schedule_type" => "broadcast_schedule_type",
+        "scheduleDate" => "broadcast_schedule_date",
+        "schedule_date" => "broadcast_schedule_date",
+        "scheduleTime" => "broadcast_schedule_time",
+        "schedule_time" => "broadcast_schedule_time",
+        "scheduleDays" => "broadcast_schedule_days",
+        "schedule_days" => "broadcast_schedule_days",
+        "scheduleEndDate" => "broadcast_schedule_end_date",
+        "schedule_end_date" => "broadcast_schedule_end_date",
+        // Retry fields
+        "retryEnabled" => "broadcast_retry_enabled",
+        "retry_enabled" => "broadcast_retry_enabled",
+        "retryMax" => "broadcast_retry_max",
+        "retry_max" => "broadcast_retry_max",
+        "retryInterval" => "broadcast_retry_interval",
+        "retry_interval" => "broadcast_retry_interval",
+        "retryCauses" => "broadcast_retry_causes",
+        "retry_causes" => "broadcast_retry_causes"
     );
 
     foreach ($field_mappings as $input_field => $db_field) {
@@ -78,6 +100,21 @@ function do_action($body) {
             // Handle phone numbers as array
             if ($db_field == "broadcast_phone_numbers" && is_array($value)) {
                 $value = implode("\n", $value);
+            }
+
+            // Handle schedule_days as array
+            if ($db_field == "broadcast_schedule_days" && is_array($value)) {
+                $value = implode(",", $value);
+            }
+
+            // Handle boolean fields
+            if ($db_field == "broadcast_schedule_enabled" || $db_field == "broadcast_retry_enabled") {
+                $value = ($value === true || $value === 'true') ? 'true' : 'false';
+            }
+
+            // Handle retry_causes as array
+            if ($db_field == "broadcast_retry_causes" && is_array($value)) {
+                $value = implode(",", $value);
             }
 
             $updates[] = "$db_field = :$db_field";
@@ -98,7 +135,24 @@ function do_action($body) {
     $sql = "UPDATE v_call_broadcasts SET " . implode(", ", $updates) .
            " WHERE call_broadcast_uuid = :call_broadcast_uuid AND domain_uuid = :domain_uuid";
 
-    $database->execute($sql, $parameters);
+    try {
+        $database->execute($sql, $parameters);
+    } catch (Exception $e) {
+        return array(
+            "success" => false,
+            "error" => "Failed to update broadcast: " . $e->getMessage()
+        );
+    }
+
+    // Verify update by checking update_date
+    $verify_sql = "SELECT update_date FROM v_call_broadcasts WHERE call_broadcast_uuid = :call_broadcast_uuid";
+    $verify_result = $database->select($verify_sql, array("call_broadcast_uuid" => $call_broadcast_uuid), "row");
+    if (empty($verify_result) || empty($verify_result['update_date'])) {
+        return array(
+            "success" => false,
+            "error" => "Broadcast update failed - database update did not succeed"
+        );
+    }
 
     return array(
         "success" => true,
