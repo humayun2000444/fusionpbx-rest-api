@@ -236,9 +236,10 @@ function start_broadcast($broadcast, $database) {
         return array("success" => false, "error" => "No valid phone numbers");
     }
 
-    // Get broadcast settings
+    // Get broadcast settings - support multiple caller IDs (comma-separated)
     $caller_id_name = $broadcast['broadcast_caller_id_name'] ?: 'Call Broadcast';
-    $caller_id_number = $broadcast['broadcast_caller_id_number'] ?: '0000000000';
+    $caller_id_pool = array_filter(array_map('trim', explode(',', $broadcast['broadcast_caller_id_number'] ?: '0000000000')));
+    if (empty($caller_id_pool)) $caller_id_pool = array('0000000000');
     $destination_type = $broadcast['broadcast_destination_type'] ?: 'transfer';
     $destination_data = $broadcast['broadcast_destination_data'];
     $concurrent_limit = intval($broadcast['broadcast_concurrent_limit']) ?: 5;
@@ -279,6 +280,9 @@ function start_broadcast($broadcast, $database) {
         // Calculate delay for this call
         $batch_number = floor($index / $concurrent_limit);
         $delay = $start_time + ($batch_number * $timeout);
+
+        // Randomly pick a caller ID from the pool for this call
+        $caller_id_number = $caller_id_pool[array_rand($caller_id_pool)];
 
         // Build originate command based on destination type
         // origination_caller_id = what called party sees (company number)
@@ -409,7 +413,9 @@ function process_broadcast_retry($call_broadcast_uuid, $domain_uuid, $database) 
         if (strpos($auth, '+OK') === false) { fclose($fp); return array("success" => false, "error" => "ESL auth failed"); }
 
         $caller_name = $broadcast['broadcast_caller_id_name'] ?: 'Call Broadcast';
-        $caller_number = $broadcast['broadcast_caller_id_number'] ?: '0000000000';
+        // Support multiple caller IDs (comma-separated) - random pick per retry call
+        $caller_id_pool = array_filter(array_map('trim', explode(',', $broadcast['broadcast_caller_id_number'] ?: '0000000000')));
+        if (empty($caller_id_pool)) $caller_id_pool = array('0000000000');
         $dest = $broadcast['broadcast_destination_data'];
         $accountcode = $broadcast['broadcast_accountcode'] ?: $domain_name;
         $concurrent = intval($broadcast['broadcast_concurrent_limit']) ?: 5;
@@ -419,6 +425,8 @@ function process_broadcast_retry($call_broadcast_uuid, $domain_uuid, $database) 
 
         foreach ($retries as $lead) {
             $phone = $lead['phone_number'];
+            // Randomly pick a caller ID from the pool for this retry call
+            $caller_number = $caller_id_pool[array_rand($caller_id_pool)];
             $vars = "^^:ignore_early_media=true:ignore_display_updates=true:sip_cid_type=none";
             $vars .= ":origination_caller_id_name='$caller_name':origination_caller_id_number=$caller_number";
             $vars .= ":caller_id_number=$phone:caller_id_name=$phone";

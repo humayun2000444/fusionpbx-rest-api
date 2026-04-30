@@ -5,6 +5,9 @@ $required_params = array("callBroadcastUuid");
 function do_action($body) {
     global $domain_uuid;
 
+
+
+
     // Use domain_uuid from request if provided, otherwise use global
     $db_domain_uuid = isset($body->domain_uuid) ? $body->domain_uuid : $domain_uuid;
 
@@ -93,6 +96,12 @@ function do_action($body) {
         "retry_causes" => "broadcast_retry_causes"
     );
 
+    // Date/time fields that must be NULL instead of empty string (PostgreSQL rejects "" for date/time types)
+    $nullable_fields = array(
+        "broadcast_schedule_date", "broadcast_schedule_time",
+        "broadcast_schedule_end_date", "broadcast_schedule_days"
+    );
+
     foreach ($field_mappings as $input_field => $db_field) {
         if (isset($body->$input_field)) {
             $value = $body->$input_field;
@@ -117,6 +126,11 @@ function do_action($body) {
                 $value = implode(",", $value);
             }
 
+            // Convert empty strings to NULL for date/time columns
+            if (in_array($db_field, $nullable_fields) && (is_string($value) && trim($value) === '' || (is_array($value) && empty($value)))) {
+                $value = null;
+            }
+
             $updates[] = "$db_field = :$db_field";
             $parameters[$db_field] = $value;
         }
@@ -136,7 +150,15 @@ function do_action($body) {
            " WHERE call_broadcast_uuid = :call_broadcast_uuid AND domain_uuid = :domain_uuid";
 
     try {
-        $database->execute($sql, $parameters);
+        $result = $database->execute($sql, $parameters);
+        if ($result === false) {
+            $msg = isset($database->message['message']) ? $database->message['message'] : 'Unknown database error';
+            error_log("BROADCAST_UPDATE_ERROR: " . $msg);
+            return array(
+                "success" => false,
+                "error" => "Failed to update broadcast: " . $msg
+            );
+        }
     } catch (Exception $e) {
         return array(
             "success" => false,

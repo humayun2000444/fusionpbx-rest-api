@@ -148,7 +148,9 @@ function do_action($body) {
         }
 
         $broadcast_caller_id_name = $broadcast['broadcast_caller_id_name'] ?: 'Call Broadcast';
-        $broadcast_caller_id_number = $broadcast['broadcast_caller_id_number'] ?: '0000000000';
+        // Support multiple caller IDs (comma-separated) - random pick per retry call
+        $broadcast_caller_id_pool = array_filter(array_map('trim', explode(',', $broadcast['broadcast_caller_id_number'] ?: '0000000000')));
+        if (empty($broadcast_caller_id_pool)) $broadcast_caller_id_pool = array('0000000000');
         $broadcast_destination_data = $broadcast['broadcast_destination_data'];
         $broadcast_avmd = $broadcast['broadcast_avmd'];
         $broadcast_accountcode = $broadcast['broadcast_accountcode'] ?: $db_domain_name;
@@ -161,6 +163,9 @@ function do_action($body) {
 
         foreach ($retry_leads as $lead) {
             $phone_number = $lead['phone_number'];
+
+            // Randomly pick a caller ID from the pool for this retry call
+            $broadcast_caller_id_number = $broadcast_caller_id_pool[array_rand($broadcast_caller_id_pool)];
 
             // Build channel variables (same as start)
             $channel_variables = "^^:ignore_early_media=true:ignore_display_updates=true:sip_cid_type=none";

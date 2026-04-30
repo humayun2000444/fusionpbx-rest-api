@@ -60,7 +60,10 @@ function do_action($body) {
     $broadcast_timeout = is_numeric($broadcast['broadcast_timeout']) ? $broadcast['broadcast_timeout'] : 30;
     $broadcast_concurrent_limit = is_numeric($broadcast['broadcast_concurrent_limit']) ? $broadcast['broadcast_concurrent_limit'] : 5;
     $broadcast_caller_id_name = !empty($broadcast['broadcast_caller_id_name']) ? $broadcast['broadcast_caller_id_name'] : 'Call Broadcast';
-    $broadcast_caller_id_number = !empty($broadcast['broadcast_caller_id_number']) ? $broadcast['broadcast_caller_id_number'] : '0000000000';
+    // Support multiple caller IDs (comma-separated) - random pick per call
+    $broadcast_caller_id_raw = !empty($broadcast['broadcast_caller_id_number']) ? $broadcast['broadcast_caller_id_number'] : '0000000000';
+    $broadcast_caller_id_pool = array_filter(array_map('trim', explode(',', $broadcast_caller_id_raw)));
+    if (empty($broadcast_caller_id_pool)) $broadcast_caller_id_pool = array('0000000000');
     $broadcast_destination_data = $broadcast['broadcast_destination_data'];
     $broadcast_avmd = $broadcast['broadcast_avmd'];
     $broadcast_accountcode = !empty($broadcast['broadcast_accountcode']) ? $broadcast['broadcast_accountcode'] : $db_domain_name;
@@ -170,6 +173,9 @@ function do_action($body) {
         $phone_number = preg_replace('/\D/', '', trim($phone_parts[0]));
 
         if (!empty($phone_number) && is_numeric($phone_number)) {
+            // Randomly pick a caller ID from the pool for this call
+            $broadcast_caller_id_number = $broadcast_caller_id_pool[array_rand($broadcast_caller_id_pool)];
+
             // Build channel variables
             // For outbound broadcast:
             //   origination_caller_id = what called party sees (company caller ID)
