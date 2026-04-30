@@ -215,6 +215,29 @@ if (is_array($stuck_broadcasts) && count($stuck_broadcasts) > 0) {
     }
 }
 
+// ==================== PREDICTIVE DIALER DAEMON CHECK ====================
+// If any predictive broadcasts are running, ensure the dialer daemon is alive
+$predictive_sql = "SELECT COUNT(*) as cnt FROM v_call_broadcasts
+                   WHERE broadcast_status = 'running' AND broadcast_pacing_mode = 'predictive'";
+$predictive_count = $database->select($predictive_sql, array(), "row");
+
+if ($predictive_count && intval($predictive_count['cnt']) > 0) {
+    $pid_file = '/var/run/fusionpbx/dialer.pid';
+    $dialer_running = false;
+    if (file_exists($pid_file)) {
+        $pid = trim(file_get_contents($pid_file));
+        if ($pid && file_exists("/proc/$pid")) {
+            $dialer_running = true;
+        }
+    }
+    if (!$dialer_running) {
+        log_scheduler("Predictive broadcasts running but dialer daemon not found. Starting it...");
+        $dialer_script = '/var/www/fusionpbx/app/rest_api/actions/call-broadcast-dialer.php';
+        exec("nohup php $dialer_script > /dev/null 2>&1 &");
+        log_scheduler("Dialer daemon started.");
+    }
+}
+
 log_scheduler("Scheduler completed");
 
 /**

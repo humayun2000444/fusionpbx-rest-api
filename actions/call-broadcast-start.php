@@ -117,6 +117,9 @@ function do_action($body) {
     $retry_max = isset($broadcast['broadcast_retry_max']) ? intval($broadcast['broadcast_retry_max']) : 0;
     $max_attempts = $retry_enabled ? ($retry_max + 1) : 1; // +1 for initial attempt
 
+    // Check pacing mode
+    $pacing_mode = isset($broadcast['broadcast_pacing_mode']) ? $broadcast['broadcast_pacing_mode'] : 'power';
+
     // Parse phone numbers
     $phone_numbers = array_filter(explode("\n", trim($broadcast['broadcast_phone_numbers'])));
     $sched_seconds = $broadcast_start_time;
@@ -166,6 +169,44 @@ function do_action($body) {
         }
     }
 
+    // PREDICTIVE MODE: Don't fire calls here - the dialer daemon handles pacing
+    if ($pacing_mode === 'predictive') {
+        // Reset current dial ratio to base ratio
+        $base_ratio = isset($broadcast['broadcast_dial_ratio']) ? floatval($broadcast['broadcast_dial_ratio']) : 1.50;
+        $database->execute(
+            "UPDATE v_call_broadcasts SET broadcast_current_dial_ratio = :ratio, broadcast_total_answered = 0,
+             broadcast_total_abandoned = 0 WHERE call_broadcast_uuid = :uuid",
+            array("ratio" => $base_ratio, "uuid" => $call_broadcast_uuid)
+        );
+
+        // Start the dialer daemon if not already running
+        $pid_file = '/var/run/fusionpbx/dialer.pid';
+        $dialer_running = false;
+        if (file_exists($pid_file)) {
+            $pid = trim(file_get_contents($pid_file));
+            if ($pid && file_exists("/proc/$pid")) {
+                $dialer_running = true;
+            }
+        }
+        if (!$dialer_running) {
+            $dialer_script = '/var/www/fusionpbx/app/rest_api/actions/call-broadcast-dialer.php';
+            exec("nohup php $dialer_script > /dev/null 2>&1 &");
+        }
+
+        return array(
+            "success" => true,
+            "message" => "Predictive broadcast started - dialer engine will pace calls based on agent availability",
+            "callBroadcastUuid" => $call_broadcast_uuid,
+            "broadcastName" => $broadcast_name,
+            "pacingMode" => "predictive",
+            "dialRatio" => $base_ratio,
+            "totalLeads" => count($phone_numbers),
+            "destination" => $broadcast_destination_data,
+            "status" => "running"
+        );
+    }
+
+    // POWER MODE: Fire all calls at once with batch scheduling (original behavior)
     foreach ($phone_numbers as $phone_line) {
         // Parse phone number (may contain other data separated by | or ;)
         $phone_line = str_replace(";", "|", $phone_line);

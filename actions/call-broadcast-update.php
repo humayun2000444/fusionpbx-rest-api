@@ -93,7 +93,14 @@ function do_action($body) {
         "retryInterval" => "broadcast_retry_interval",
         "retry_interval" => "broadcast_retry_interval",
         "retryCauses" => "broadcast_retry_causes",
-        "retry_causes" => "broadcast_retry_causes"
+        "retry_causes" => "broadcast_retry_causes",
+        // Predictive dialer fields
+        "broadcastPacingMode" => "broadcast_pacing_mode",
+        "broadcast_pacing_mode" => "broadcast_pacing_mode",
+        "broadcastDialRatio" => "broadcast_dial_ratio",
+        "broadcast_dial_ratio" => "broadcast_dial_ratio",
+        "broadcastMaxAbandonRate" => "broadcast_max_abandon_rate",
+        "broadcast_max_abandon_rate" => "broadcast_max_abandon_rate"
     );
 
     // Date/time fields that must be NULL instead of empty string (PostgreSQL rejects "" for date/time types)

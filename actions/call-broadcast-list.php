@@ -38,6 +38,12 @@ function do_action($body) {
                 broadcast_retry_causes,
                 broadcast_status,
                 broadcast_last_run,
+                broadcast_pacing_mode,
+                broadcast_dial_ratio,
+                broadcast_current_dial_ratio,
+                broadcast_max_abandon_rate,
+                broadcast_total_answered,
+                broadcast_total_abandoned,
                 insert_date,
                 update_date,
                 LENGTH(broadcast_phone_numbers) - LENGTH(REPLACE(broadcast_phone_numbers, E'\\n', '')) + 1 as phone_count

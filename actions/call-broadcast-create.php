@@ -96,6 +96,16 @@ function do_action($body) {
         $retry_causes = implode(',', $retry_causes);
     }
 
+    // Predictive dialer parameters
+    $pacing_mode = isset($body->broadcastPacingMode) ? $body->broadcastPacingMode :
+                  (isset($body->broadcast_pacing_mode) ? $body->broadcast_pacing_mode : 'power');
+
+    $dial_ratio = isset($body->broadcastDialRatio) ? floatval($body->broadcastDialRatio) :
+                 (isset($body->broadcast_dial_ratio) ? floatval($body->broadcast_dial_ratio) : 1.50);
+
+    $max_abandon_rate = isset($body->broadcastMaxAbandonRate) ? floatval($body->broadcastMaxAbandonRate) :
+                       (isset($body->broadcast_max_abandon_rate) ? floatval($body->broadcast_max_abandon_rate) : 3.00);
+
     // Handle phone numbers as array or string
     if (is_array($broadcast_phone_numbers)) {
         $broadcast_phone_numbers = implode("\n", $broadcast_phone_numbers);
@@ -165,6 +175,23 @@ function do_action($body) {
     $columns[] = "broadcast_retry_interval";
     $values[] = ":broadcast_retry_interval";
     $parameters["broadcast_retry_interval"] = $retry_interval;
+
+    // Predictive dialer fields
+    $columns[] = "broadcast_pacing_mode";
+    $values[] = ":broadcast_pacing_mode";
+    $parameters["broadcast_pacing_mode"] = $pacing_mode;
+
+    $columns[] = "broadcast_dial_ratio";
+    $values[] = ":broadcast_dial_ratio";
+    $parameters["broadcast_dial_ratio"] = $dial_ratio;
+
+    $columns[] = "broadcast_max_abandon_rate";
+    $values[] = ":broadcast_max_abandon_rate";
+    $parameters["broadcast_max_abandon_rate"] = $max_abandon_rate;
+
+    $columns[] = "broadcast_current_dial_ratio";
+    $values[] = ":broadcast_current_dial_ratio";
+    $parameters["broadcast_current_dial_ratio"] = $dial_ratio;
 
     foreach ($optional_fields as $field => $value) {
         if (!empty($value)) {
