@@ -83,7 +83,8 @@ function do_action($body) {
             $boss_ext, $secretary_ext, $mode, $vip_list, $ring_timeout, $cid_prefix, $boss_name);
     }
 
-    // Reload dialplan
+    // Clear cache and reload dialplan
+    clear_dialplan_cache($domain_name);
     require_once "resources/switch.php";
     $esl = event_socket::create();
     if ($esl) event_socket::api("reloadxml");

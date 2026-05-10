@@ -52,7 +52,8 @@ function do_action($body) {
             $existing['cid_prefix'], $existing['boss_name']);
     }
 
-    // Reload dialplan
+    // Clear cache and reload dialplan
+    clear_dialplan_cache($domain_name);
     require_once "resources/switch.php";
     $esl = event_socket::create();
     if ($esl) event_socket::api("reloadxml");

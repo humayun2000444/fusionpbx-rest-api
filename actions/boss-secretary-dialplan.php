@@ -5,6 +5,13 @@
 
 define('BOSS_SEC_APP_UUID', 'b0555ec4-e7a4-4000-b055-000000000001');
 
+function clear_dialplan_cache($domain_name) {
+    $cache_file = '/var/cache/fusionpbx/dialplan.' . $domain_name;
+    if (file_exists($cache_file)) {
+        @unlink($cache_file);
+    }
+}
+
 function generate_boss_secretary_dialplan($database, $dialplan_uuid, $domain_uuid, $domain_name,
     $boss_ext, $secretary_ext, $mode, $vip_list, $ring_timeout, $cid_prefix, $boss_name) {
 
