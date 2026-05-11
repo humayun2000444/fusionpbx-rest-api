@@ -20,9 +20,9 @@ function do_action($body) {
         );
     }
 
-    // Optional parameters
-    $call_block_name = isset($body->callBlockName) ? $body->callBlockName :
-                      (isset($body->call_block_name) ? $body->call_block_name : $call_block_number);
+    // Name is always NULL - FusionPBX Lua requires name=NULL for number-only matching
+    // If name is set, Lua tries to match BOTH caller_id_name AND number which fails
+    $call_block_name = null;
 
     $call_block_direction = isset($body->callBlockDirection) ? $body->callBlockDirection :
                            (isset($body->call_block_direction) ? $body->call_block_direction : 'inbound');
@@ -37,7 +37,7 @@ function do_action($body) {
                         (isset($body->call_block_action) ? $body->call_block_action : 'reject');
 
     $call_block_app = isset($body->callBlockApp) ? $body->callBlockApp :
-                     (isset($body->call_block_app) ? $body->call_block_app : 'hangup');
+                     (isset($body->call_block_app) ? $body->call_block_app : 'reject');
 
     $call_block_data = isset($body->callBlockData) ? $body->callBlockData :
                       (isset($body->call_block_data) ? $body->call_block_data : '');
