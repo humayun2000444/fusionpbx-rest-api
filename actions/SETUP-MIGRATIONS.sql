@@ -33,3 +33,20 @@ ALTER TABLE v_call_broadcasts ADD COLUMN IF NOT EXISTS broadcast_avg_talk_time I
 -- 3. Predictive Dialer - call_uuid + abandoned on leads
 ALTER TABLE v_call_broadcast_leads ADD COLUMN IF NOT EXISTS call_uuid UUID;
 ALTER TABLE v_call_broadcast_leads ADD COLUMN IF NOT EXISTS abandoned BOOLEAN DEFAULT false;
+
+-- 4. Speed Dial table
+CREATE TABLE IF NOT EXISTS v_speed_dials (
+    speed_dial_uuid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    domain_uuid UUID NOT NULL,
+    extension_uuid UUID,
+    speed_dial_code VARCHAR(10) NOT NULL,
+    speed_dial_number VARCHAR(64) NOT NULL,
+    speed_dial_label VARCHAR(128),
+    speed_dial_type VARCHAR(20) DEFAULT 'domain',
+    enabled VARCHAR(8) DEFAULT 'true',
+    insert_date TIMESTAMPTZ DEFAULT NOW(),
+    update_date TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_speed_dial_domain ON v_speed_dials(domain_uuid);
+CREATE INDEX IF NOT EXISTS idx_speed_dial_ext ON v_speed_dials(extension_uuid);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_speed_dial_unique ON v_speed_dials(domain_uuid, COALESCE(extension_uuid, '00000000-0000-0000-0000-000000000000'), speed_dial_code);

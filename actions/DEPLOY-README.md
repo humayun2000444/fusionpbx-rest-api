@@ -58,6 +58,18 @@ sudo fs_cli -x 'reloadxml'
 **Important:** Boss-Secretary requires `dialplan_xml` column in `v_dialplans` (FusionPBX Lua handler reads this).
 After creating/updating a pair, clear the dialplan cache: `rm /var/cache/fusionpbx/dialplan.{domain}`
 
+### Speed Dial
+- `speed-dial-create.php` - Create speed dial (domain-wide or personal)
+- `speed-dial-list.php` - List speed dials by domain
+- `speed-dial-update.php` - Update speed dial
+- `speed-dial-delete.php` - Delete speed dial
+- `speed-dial-dialplan.php` - Auto-generate dialplan for *XX pattern
+- `speed-dial-lookup.lua` - Lua lookup script (goes to /usr/share/freeswitch/scripts/)
+
+**Features:** Domain-wide (shared) and personal (per-extension) speed dials.
+Personal overrides domain. Secretary-to-boss speed dial bypasses boss-secretary filter.
+Dialplan auto-generated at order 65 (before built-in *0 speed dial at 70).
+
 ### Predictive Dialer
 - `call-broadcast-dialer.php` - Predictive pacing daemon
 - `call-broadcast-report.php` - Campaign report API
@@ -121,6 +133,12 @@ time-condition-details.php
 time-condition-list.php
 time-condition-toggle.php
 time-condition-update.php
+speed-dial-create.php
+speed-dial-delete.php
+speed-dial-dialplan.php
+speed-dial-list.php
+speed-dial-lookup.lua
+speed-dial-update.php
 SETUP-MIGRATIONS.sql
 DEPLOY-README.md
 ```

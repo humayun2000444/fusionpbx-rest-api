@@ -146,6 +146,22 @@ function do_action($body) {
         );
     }
 
+    // Auto-enable call_block dialplan for this domain
+    $database->execute(
+        "UPDATE v_dialplans SET dialplan_enabled = 'true' WHERE domain_uuid = :domain AND dialplan_name = 'call_block' AND dialplan_enabled = 'false'",
+        array("domain" => $db_domain_uuid)
+    );
+
+    // Clear dialplan cache and reload
+    $domain_result = $database->select("SELECT domain_name FROM v_domains WHERE domain_uuid = :uuid", array("uuid" => $db_domain_uuid), "row");
+    if ($domain_result) {
+        $cache_file = '/var/cache/fusionpbx/dialplan.' . $domain_result['domain_name'];
+        if (file_exists($cache_file)) @unlink($cache_file);
+    }
+    require_once "resources/switch.php";
+    $esl = event_socket::create();
+    if ($esl) event_socket::api("reloadxml");
+
     return array(
         "success" => true,
         "message" => "Call block created successfully",
