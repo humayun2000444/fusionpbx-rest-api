@@ -31,7 +31,7 @@ function do_action($body) {
     if (!empty($extensions)) {
         foreach ($extensions as $ext) {
             $tollAllow = $ext['toll_allow'] ?? '';
-            $permissions = array_map('trim', explode(',', $tollAllow));
+            $permissions = array_map('trim', preg_split('/[,:]/', $tollAllow));
 
             $result[] = array(
                 'extension_uuid' => $ext['extension_uuid'],

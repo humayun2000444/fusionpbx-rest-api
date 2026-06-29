@@ -50,6 +50,21 @@ function do_action($body) {
     // Get description
     $dialplan_description = isset($body->dialplan_description) ? $body->dialplan_description : null;
 
+    // Detect toll_allow type from destination pattern or explicit parameter
+    // Domestic: 11-digit (starts with 0) or 13-digit (starts with 880)
+    // International: starts with 00 or +, variable length
+    $toll_allow_type = null;
+    if (isset($body->toll_allow_type)) {
+        $toll_allow_type = $body->toll_allow_type;
+    } else {
+        $pattern = $body->destination_pattern;
+        if (preg_match('/\^0|880|d\{11\}|d\{13\}|\{11\}|\{13\}/', $pattern)) {
+            $toll_allow_type = 'domestic';
+        } elseif (preg_match('/00|\\\\?\+/', $pattern)) {
+            $toll_allow_type = 'international';
+        }
+    }
+
     // ========================================
     // DIALPLAN 1: call_direction-outbound (order 22)
     // ========================================
@@ -127,6 +142,11 @@ function do_action($body) {
     // Condition: user_exists = false
     insert_detail($dialplan_uuid_2, $route_domain_uuid, 'condition', '${user_exists}', 'false', 0, $detail_order += 10);
 
+    // Condition: toll_allow check (if domestic or international detected)
+    if ($toll_allow_type) {
+        insert_detail($dialplan_uuid_2, $route_domain_uuid, 'condition', '${toll_allow}', $toll_allow_type, 0, $detail_order += 10);
+    }
+
     // Condition: destination_number pattern
     insert_detail($dialplan_uuid_2, $route_domain_uuid, 'condition', 'destination_number', $body->destination_pattern, 0, $detail_order += 10);
 
@@ -176,6 +196,91 @@ function do_action($body) {
     $dialplan_continue_2 = isset($body->dialplan_continue) ? $body->dialplan_continue : "false";
     $xml_2 = generate_dialplan_xml($dialplan_uuid_2, $body->dialplan_name, $dialplan_continue_2);
     update_dialplan_xml($dialplan_uuid_2, $xml_2);
+
+    // Ensure the Lua script exists on the server
+    if ($toll_allow_type) {
+        $lua_path = '/usr/share/freeswitch/scripts/set_toll_allow.lua';
+        if (!file_exists($lua_path)) {
+            $conf_file = file_exists('/etc/fusionpbx/config.conf') ? '/etc/fusionpbx/config.conf' : '/usr/local/etc/fusionpbx/config.conf';
+            $db_password = '';
+            $db_user = 'fusionpbx';
+            $db_name = 'fusionpbx';
+            $db_host = '127.0.0.1';
+            if (file_exists($conf_file)) {
+                $lines = file($conf_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+                foreach ($lines as $line) {
+                    if (strpos($line, 'database.0.password') !== false) {
+                        $db_password = trim(explode('=', $line, 2)[1]);
+                    } elseif (strpos($line, 'database.0.username') !== false) {
+                        $db_user = trim(explode('=', $line, 2)[1]);
+                    } elseif (strpos($line, 'database.0.name') !== false) {
+                        $db_name = trim(explode('=', $line, 2)[1]);
+                    } elseif (strpos($line, 'database.0.host') !== false) {
+                        $db_host = trim(explode('=', $line, 2)[1]);
+                    }
+                }
+            }
+            $lua_content = <<<'LUA'
+local caller = session:getVariable("caller_id_number")
+local domain = session:getVariable("domain_name")
+if caller and domain then
+    local dbh = freeswitch.Dbh("pgsql://hostaddr=__DB_HOST__ dbname=__DB_NAME__ user=__DB_USER__ password=__DB_PASS__")
+    if dbh:connected() then
+        local sql = string.format(
+            "SELECT e.toll_allow FROM v_extensions e JOIN v_domains d ON e.domain_uuid = d.domain_uuid WHERE e.extension = '%s' AND d.domain_name = '%s' AND e.enabled = 'true' LIMIT 1",
+            caller:gsub("'", "''"), domain:gsub("'", "''")
+        )
+        dbh:query(sql, function(row)
+            if row.toll_allow and row.toll_allow ~= "" then
+                session:setVariable("toll_allow", row.toll_allow)
+                freeswitch.consoleLog("NOTICE", "[set_toll_allow] Refreshed toll_allow=" .. row.toll_allow .. " for " .. caller .. "@" .. domain .. "\n")
+            end
+        end)
+        dbh:release()
+    end
+end
+LUA;
+            $lua_content = str_replace(
+                array('__DB_HOST__', '__DB_NAME__', '__DB_USER__', '__DB_PASS__'),
+                array($db_host, $db_name, $db_user, $db_password),
+                $lua_content
+            );
+            @file_put_contents($lua_path, $lua_content);
+            @chmod($lua_path, 0644);
+        }
+    }
+
+    // Create toll_allow_refresh dialplan if it doesn't exist for this domain
+    // This Lua script refreshes toll_allow from DB on every outbound call,
+    // so permission changes take effect instantly without re-registration
+    if ($toll_allow_type) {
+        $sql = "SELECT COUNT(*) as cnt FROM v_dialplans WHERE dialplan_context = :context AND dialplan_name = 'toll_allow_refresh'";
+        $database = new database;
+        $check = $database->select($sql, array("context" => $context), "row");
+
+        if (empty($check) || $check['cnt'] == 0) {
+            $refresh_uuid = uuid();
+            $refresh_xml = '<extension name="toll_allow_refresh" continue="true">' . "\n"
+                . "\t" . '<condition field="destination_number" expression="^(0\d{10}|880\d{10}|(00|\+)\d+)$">' . "\n"
+                . "\t\t" . '<action application="lua" data="set_toll_allow.lua"/>' . "\n"
+                . "\t" . '</condition>' . "\n"
+                . '</extension>';
+
+            $sql = "INSERT INTO v_dialplans (dialplan_uuid, domain_uuid, app_uuid, dialplan_name,
+                    dialplan_context, dialplan_order, dialplan_enabled, dialplan_description, dialplan_xml, insert_date)
+                    VALUES (:dialplan_uuid, :domain_uuid, :app_uuid, 'toll_allow_refresh',
+                    :dialplan_context, 21, 'true', 'Refresh toll_allow from DB on every outbound call', :dialplan_xml, NOW())";
+            $parameters = array(
+                "dialplan_uuid" => $refresh_uuid,
+                "domain_uuid" => $route_domain_uuid,
+                "app_uuid" => $outbound_app_uuid,
+                "dialplan_context" => $context,
+                "dialplan_xml" => $refresh_xml
+            );
+            $database = new database;
+            $database->execute($sql, $parameters);
+        }
+    }
 
     // Clear cache and reload dialplan
     $reload_output = "";

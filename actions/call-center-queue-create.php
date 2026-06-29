@@ -108,8 +108,8 @@ function do_action($body) {
 
     $database->execute($sql_insert, $parameters);
 
-    // Create dialplan for the queue
-    create_queue_dialplan($database, $dialplan_uuid, $db_domain_uuid, $domain_name, $queue_name, $queue_extension, $queue_uuid);
+    // Create dialplan for the queue (with dialplan_xml like FusionPBX GUI)
+    create_queue_dialplan($database, $dialplan_uuid, $db_domain_uuid, $domain_name, $queue_name, $queue_extension, $queue_uuid, $queue_cid_prefix, $queue_greeting, $queue_cc_exit_keys, $queue_timeout_action);
 
     // Clear the callcenter config cache so FreeSWITCH regenerates it
     require_once "resources/switch.php";
@@ -143,16 +143,53 @@ function do_action($body) {
     );
 }
 
-function create_queue_dialplan($database, $dialplan_uuid, $domain_uuid, $domain_name, $queue_name, $queue_extension, $queue_uuid) {
-    // Insert dialplan
+function create_queue_dialplan($database, $dialplan_uuid, $domain_uuid, $domain_name, $queue_name, $queue_extension, $queue_uuid, $queue_cid_prefix = '', $queue_greeting = '', $queue_cc_exit_keys = '', $queue_timeout_action = '') {
+    // Build dialplan_xml exactly like FusionPBX GUI does
+    $xml = '<extension name="' . htmlspecialchars($queue_name) . '" continue="false" uuid="' . $dialplan_uuid . '">' . "\n";
+
+    // Group 1: CID prefix strip (caller_id_name contains #)
+    $xml .= '	<condition field="${caller_id_name}" expression="^([^#]+#)(.*)$" break="never">' . "\n";
+    $xml .= '		<action application="set" data="caller_id_name=$2"/>' . "\n";
+    $xml .= '	</condition>' . "\n";
+
+    // Group 2: Main condition + actions
+    $xml .= '	<condition field="destination_number" expression="^' . $queue_extension . '$">' . "\n";
+    $xml .= '		<action application="answer" data=""/>' . "\n";
+    $xml .= '		<action application="set" data="hangup_after_bridge=true"/>' . "\n";
+
+    if (!empty($queue_cid_prefix)) {
+        $xml .= '		<action application="set" data="effective_caller_id_name=' . htmlspecialchars($queue_cid_prefix) . '#${caller_id_name}"/>' . "\n";
+    }
+
+    if (!empty($queue_greeting)) {
+        $xml .= '		<action application="sleep" data="1000"/>' . "\n";
+        $xml .= '		<action application="playback" data="' . htmlspecialchars($queue_greeting) . '"/>' . "\n";
+    }
+
+    if (!empty($queue_cc_exit_keys)) {
+        $xml .= '		<action application="set" data="cc_exit_keys=' . htmlspecialchars($queue_cc_exit_keys) . '"/>' . "\n";
+    }
+
+    $xml .= '		<action application="callcenter" data="' . $queue_name . '@' . $domain_name . '"/>' . "\n";
+
+    if (!empty($queue_timeout_action)) {
+        $action_parts = explode(":", $queue_timeout_action, 2);
+        $xml .= '		<action application="' . htmlspecialchars($action_parts[0]) . '" data="' . htmlspecialchars($action_parts[1] ?? '') . '"/>' . "\n";
+    }
+
+    $xml .= '		<action application="hangup" data=""/>' . "\n";
+    $xml .= '	</condition>' . "\n";
+    $xml .= '</extension>';
+
+    // Insert dialplan WITH dialplan_xml (same app_uuid and order as FusionPBX GUI)
     $sql = "INSERT INTO v_dialplans (
         dialplan_uuid, domain_uuid, app_uuid, dialplan_name, dialplan_number,
         dialplan_context, dialplan_continue, dialplan_order, dialplan_enabled,
-        dialplan_description, insert_date
+        dialplan_description, dialplan_xml, insert_date
     ) VALUES (
-        :dialplan_uuid, :domain_uuid, '95788e50-9500-079e-2f52-9a6144243070', :dialplan_name, :dialplan_number,
-        :dialplan_context, 'false', '333', 'true',
-        :dialplan_description, NOW()
+        :dialplan_uuid, :domain_uuid, '95788e50-9500-079e-2807-fd530b0ea370', :dialplan_name, :dialplan_number,
+        :dialplan_context, 'false', '210', 'true',
+        :dialplan_description, :dialplan_xml, NOW()
     )";
 
     $database->execute($sql, array(
@@ -161,37 +198,73 @@ function create_queue_dialplan($database, $dialplan_uuid, $domain_uuid, $domain_
         "dialplan_name" => $queue_name,
         "dialplan_number" => $queue_extension,
         "dialplan_context" => $domain_name,
-        "dialplan_description" => "Call Center Queue: $queue_name"
+        "dialplan_description" => "Call Center Queue: $queue_name",
+        "dialplan_xml" => $xml
     ));
 
-    // Insert dialplan details
-    $detail_uuid1 = uuid();
-    $sql = "INSERT INTO v_dialplan_details (
-        dialplan_detail_uuid, domain_uuid, dialplan_uuid, dialplan_detail_tag,
-        dialplan_detail_type, dialplan_detail_data, dialplan_detail_order, dialplan_detail_group
-    ) VALUES (
-        :detail_uuid, :domain_uuid, :dialplan_uuid, 'condition',
-        'destination_number', :pattern, '10', '0'
-    )";
-    $database->execute($sql, array(
-        "detail_uuid" => $detail_uuid1,
-        "domain_uuid" => $domain_uuid,
-        "dialplan_uuid" => $dialplan_uuid,
-        "pattern" => '^' . $queue_extension . '$'
-    ));
+    // Also insert dialplan details for FusionPBX UI compatibility
+    $y = 1;
 
-    $detail_uuid2 = uuid();
-    $sql = "INSERT INTO v_dialplan_details (
-        dialplan_detail_uuid, domain_uuid, dialplan_uuid, dialplan_detail_tag,
-        dialplan_detail_type, dialplan_detail_data, dialplan_detail_order, dialplan_detail_group
-    ) VALUES (
-        :detail_uuid, :domain_uuid, :dialplan_uuid, 'action',
-        'callcenter', :queue_id, '20', '0'
-    )";
-    $database->execute($sql, array(
-        "detail_uuid" => $detail_uuid2,
-        "domain_uuid" => $domain_uuid,
-        "dialplan_uuid" => $dialplan_uuid,
-        "queue_id" => $queue_extension . '@' . $domain_name
-    ));
+    // Detail: CID name condition (group 1)
+    $database->execute("INSERT INTO v_dialplan_details (dialplan_detail_uuid, domain_uuid, dialplan_uuid,
+        dialplan_detail_tag, dialplan_detail_type, dialplan_detail_data, dialplan_detail_break,
+        dialplan_detail_group, dialplan_detail_order)
+        VALUES (:uuid, :domain_uuid, :dialplan_uuid, 'condition', '\${caller_id_name}', '^([^#]+#)(.*)$', 'never', '1', :ord)",
+        array("uuid" => uuid(), "domain_uuid" => $domain_uuid, "dialplan_uuid" => $dialplan_uuid, "ord" => $y * 10));
+    $y++;
+
+    // Detail: CID name set action (group 1)
+    $database->execute("INSERT INTO v_dialplan_details (dialplan_detail_uuid, domain_uuid, dialplan_uuid,
+        dialplan_detail_tag, dialplan_detail_type, dialplan_detail_data,
+        dialplan_detail_group, dialplan_detail_order)
+        VALUES (:uuid, :domain_uuid, :dialplan_uuid, 'action', 'set', 'caller_id_name=\$2', '1', :ord)",
+        array("uuid" => uuid(), "domain_uuid" => $domain_uuid, "dialplan_uuid" => $dialplan_uuid, "ord" => $y * 10));
+    $y++;
+
+    // Detail: destination_number condition (group 2)
+    $database->execute("INSERT INTO v_dialplan_details (dialplan_detail_uuid, domain_uuid, dialplan_uuid,
+        dialplan_detail_tag, dialplan_detail_type, dialplan_detail_data,
+        dialplan_detail_group, dialplan_detail_order)
+        VALUES (:uuid, :domain_uuid, :dialplan_uuid, 'condition', 'destination_number', :pattern, '2', :ord)",
+        array("uuid" => uuid(), "domain_uuid" => $domain_uuid, "dialplan_uuid" => $dialplan_uuid,
+              "pattern" => '^' . $queue_extension . '$', "ord" => $y * 10));
+    $y++;
+
+    // Detail: answer (group 2)
+    $database->execute("INSERT INTO v_dialplan_details (dialplan_detail_uuid, domain_uuid, dialplan_uuid,
+        dialplan_detail_tag, dialplan_detail_type, dialplan_detail_data,
+        dialplan_detail_group, dialplan_detail_order)
+        VALUES (:uuid, :domain_uuid, :dialplan_uuid, 'action', 'answer', '', '2', :ord)",
+        array("uuid" => uuid(), "domain_uuid" => $domain_uuid, "dialplan_uuid" => $dialplan_uuid, "ord" => $y * 10));
+    $y++;
+
+    // Detail: hangup_after_bridge (group 2)
+    $database->execute("INSERT INTO v_dialplan_details (dialplan_detail_uuid, domain_uuid, dialplan_uuid,
+        dialplan_detail_tag, dialplan_detail_type, dialplan_detail_data,
+        dialplan_detail_group, dialplan_detail_order)
+        VALUES (:uuid, :domain_uuid, :dialplan_uuid, 'action', 'set', 'hangup_after_bridge=true', '2', :ord)",
+        array("uuid" => uuid(), "domain_uuid" => $domain_uuid, "dialplan_uuid" => $dialplan_uuid, "ord" => $y * 10));
+    $y++;
+
+    // Detail: callcenter action (group 2)
+    $database->execute("INSERT INTO v_dialplan_details (dialplan_detail_uuid, domain_uuid, dialplan_uuid,
+        dialplan_detail_tag, dialplan_detail_type, dialplan_detail_data,
+        dialplan_detail_group, dialplan_detail_order)
+        VALUES (:uuid, :domain_uuid, :dialplan_uuid, 'action', 'callcenter', :queue_id, '2', :ord)",
+        array("uuid" => uuid(), "domain_uuid" => $domain_uuid, "dialplan_uuid" => $dialplan_uuid,
+              "queue_id" => $queue_name . '@' . $domain_name, "ord" => $y * 10));
+    $y++;
+
+    // Detail: hangup (group 2)
+    $database->execute("INSERT INTO v_dialplan_details (dialplan_detail_uuid, domain_uuid, dialplan_uuid,
+        dialplan_detail_tag, dialplan_detail_type, dialplan_detail_data,
+        dialplan_detail_group, dialplan_detail_order)
+        VALUES (:uuid, :domain_uuid, :dialplan_uuid, 'action', 'hangup', '', '2', :ord)",
+        array("uuid" => uuid(), "domain_uuid" => $domain_uuid, "dialplan_uuid" => $dialplan_uuid, "ord" => $y * 10));
+
+    // Clear dialplan cache for this domain
+    $cache_file = '/var/cache/fusionpbx/dialplan.' . $domain_name;
+    if (file_exists($cache_file)) {
+        @unlink($cache_file);
+    }
 }
