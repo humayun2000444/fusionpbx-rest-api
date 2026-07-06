@@ -267,36 +267,23 @@ function do_action($body) {
             if (isset($opt->digits)) {
                 $option_uuid = uuid();
 
-                // Handle option action and param EXACTLY like FusionPBX GUI
                 $raw_param = isset($opt->param) ? $opt->param : '';
 
-                // If param is just a number (extension), build full transfer command
-                if (is_numeric($raw_param)) {
+                if (isset($opt->action) && !empty($opt->action)) {
+                    $ivr_menu_option_action = $opt->action;
+                    if (is_numeric($raw_param)) {
+                        $ivr_menu_option_param = 'transfer ' . $raw_param . ' XML ' . $ivr_menu_context;
+                    } else {
+                        $ivr_menu_option_param = $raw_param;
+                    }
+                } elseif (is_numeric($raw_param)) {
                     $ivr_menu_option_action = 'menu-exec-app';
                     $ivr_menu_option_param = 'transfer ' . $raw_param . ' XML ' . $ivr_menu_context;
                 } else {
-                    // Parse the combined action:param format like FusionPBX does
-                    // Input format: "menu-exec-app:transfer 123 XML context" or "menu-top" etc.
-                    $options_array = explode(":", $raw_param);
-                    $ivr_menu_option_action = array_shift($options_array);
-                    $ivr_menu_option_param = join(':', $options_array);
-
-                    // If action was passed separately, use it
-                    if (isset($opt->action) && !empty($opt->action)) {
-                        // Check if action contains colon (e.g., "menu-exec-app:transfer")
-                        if (strpos($opt->action, ':') !== false) {
-                            $action_parts = explode(':', $opt->action, 2);
-                            $ivr_menu_option_action = $action_parts[0];
-                            // Prepend the second part to param if it's an application name
-                            if (!empty($action_parts[1]) && !empty($ivr_menu_option_param)) {
-                                $ivr_menu_option_param = $action_parts[1] . ' ' . $ivr_menu_option_param;
-                            } elseif (!empty($action_parts[1])) {
-                                $ivr_menu_option_param = $action_parts[1];
-                            }
-                        } else {
-                            $ivr_menu_option_action = $opt->action;
-                        }
-                    }
+                    // Parse combined action:param format (e.g., "menu-exec-app:transfer 1001 XML ctx")
+                    $options_array = explode(":", $raw_param, 2);
+                    $ivr_menu_option_action = $options_array[0];
+                    $ivr_menu_option_param = isset($options_array[1]) ? $options_array[1] : '';
                 }
 
                 $opt_sql = "INSERT INTO v_ivr_menu_options (
