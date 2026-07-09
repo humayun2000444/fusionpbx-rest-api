@@ -126,7 +126,10 @@ function process_callbacks($database) {
 
         $ch = curl_init($url);
         $copts = array(CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => intval($cfg['callback_timeout']) ?: 15,
-                       CURLOPT_HTTPHEADER => $headers);
+                       CURLOPT_HTTPHEADER => $headers,
+                       // accept self-signed certs on internal endpoints (same as -k)
+                       CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => 0,
+                       CURLOPT_FOLLOWLOCATION => true);
         if ($method === 'POST') { $copts[CURLOPT_POST] = true; $copts[CURLOPT_POSTFIELDS] = $body; }
         else { $copts[CURLOPT_CUSTOMREQUEST] = 'GET'; }
         curl_setopt_array($ch, $copts);

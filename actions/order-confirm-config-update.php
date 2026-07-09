@@ -52,6 +52,10 @@ function do_action($body) {
         'ttsAzureRegion' => array('tts_azure_region','s'),
         'ttsElevenlabsKey' => array('tts_elevenlabs_key','s'),
         'ttsElevenlabsVoiceId' => array('tts_elevenlabs_voice_id','s'),
+        'ttsElevenlabsModel' => array('tts_elevenlabs_model','s'),
+        'ttsElevenlabsLanguage' => array('tts_elevenlabs_language','s'),
+        'ttsOpenaiKey' => array('tts_openai_key','s'),
+        'ttsOpenaiVoice' => array('tts_openai_voice','s'),
         'ackTextEn' => array('ack_text_en','s'),
         'ackTextBn' => array('ack_text_bn','s'),
     );
