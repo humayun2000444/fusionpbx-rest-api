@@ -173,10 +173,17 @@ function classify_cause($cause) {
 }
 
 function process_call_retries($database) {
-    // (a) 'calling' rows that never got answered -> classify from the CDR
+    // (a) rows that never reached a human -> classify from the CDR. Must include
+    // 'ringing' as well as 'calling': an unanswered call that got 180/183 is
+    // flipped to 'ringing' by order-confirm-ring.lua, so a 'calling'-only sweep
+    // would leave it stuck in 'ringing' forever.
+    // Backstop only: the api_hangup_hook normally sets the terminal status the
+    // instant the leg ends. 60s comfortably exceeds call_timeout (40s), so a
+    // still-live ringing call is never misclassified, while a hook miss is
+    // recovered within ~a minute instead of ~90s.
     $stuck = $database->select(
         "SELECT * FROM v_order_confirm_calls
-          WHERE status = 'calling' AND last_attempt_date < NOW() - INTERVAL '90 seconds'
+          WHERE status IN ('calling','ringing') AND last_attempt_date < NOW() - INTERVAL '60 seconds'
           LIMIT 50", array(), 'all');
     if ($stuck) {
         foreach ($stuck as $r) {

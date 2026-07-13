@@ -58,6 +58,10 @@ function do_action($body) {
         'ttsOpenaiVoice' => array('tts_openai_voice','s'),
         'ackTextEn' => array('ack_text_en','s'),
         'ackTextBn' => array('ack_text_bn','s'),
+        // industry-neutral display labels (see config-get)
+        'referenceLabel' => array('reference_label','s'),
+        'recipientLabel' => array('recipient_label','s'),
+        'entityLabel' => array('entity_label','s'),
     );
 
     $cols = array(); $params = array('domain_uuid' => $d);

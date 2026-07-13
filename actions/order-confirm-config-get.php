@@ -70,6 +70,12 @@ function do_action($body) {
             "ttsOpenaiVoice"       => isset($c['tts_openai_voice']) ? $c['tts_openai_voice'] : 'nova',
             "ackTextEn"            => isset($c['ack_text_en']) ? $c['ack_text_en'] : '',
             "ackTextBn"            => isset($c['ack_text_bn']) ? $c['ack_text_bn'] : '',
+            // Industry-neutral labels: the dashboard renders these instead of the
+            // hardcoded "Order ID" / "Customer" / "Order" so a hospital shows
+            // "Appointment ID" / "Patient", a utility "Invoice" / "Recipient", etc.
+            "referenceLabel"       => (isset($c['reference_label']) && $c['reference_label'] !== '') ? $c['reference_label'] : 'Order ID',
+            "recipientLabel"       => (isset($c['recipient_label']) && $c['recipient_label'] !== '') ? $c['recipient_label'] : 'Customer',
+            "entityLabel"          => (isset($c['entity_label']) && $c['entity_label'] !== '') ? $c['entity_label'] : 'Order',
             "dtmfOptions"          => (function($v){
                                           $a = is_array($v) ? $v : json_decode($v ?: '[]', true);
                                           return is_array($a) ? $a : array();

@@ -49,10 +49,27 @@ function oc_get_config($database, $domain_uuid) {
             'tts_openai_key' => '', 'tts_openai_voice' => 'nova',
             'ack_text_en' => 'Thank you, your response has been recorded.',
             'ack_text_bn' => 'ধন্যবাদ, আপনার উত্তর গ্রহণ করা হয়েছে।',
+            'reference_label' => 'Order ID', 'recipient_label' => 'Customer', 'entity_label' => 'Order',
             'dtmf_options' => '[{"digit":"1","label":"Confirm","action":"callback","value":"1"},{"digit":"2","label":"Cancel","action":"callback","value":"2"},{"digit":"0","label":"Support","action":"transfer","value":""}]',
         );
     }
     return $row;
+}
+
+/** Overlay system-wide TTS credentials that the TelcoREST gateway injected into
+ *  the request body (from the per-profile application properties) onto the
+ *  domain config. Lets one system-wide key serve every domain instead of a
+ *  per-domain key. Only non-empty injected values override; anything absent
+ *  keeps the domain's own stored value (so it's fully optional/back-compatible). */
+function oc_apply_system_tts_keys($config, $body) {
+    $keys = array('tts_provider', 'tts_google_key', 'tts_elevenlabs_key', 'tts_elevenlabs_voice_id',
+                  'tts_elevenlabs_model', 'tts_elevenlabs_language', 'tts_azure_key', 'tts_openai_key');
+    foreach ($keys as $k) {
+        if (isset($body->$k) && trim((string)$body->$k) !== '') {
+            $config[$k] = $body->$k;
+        }
+    }
+    return $config;
 }
 
 /** Expand digit glyphs to spoken words (offline neural TTS can't say bare
@@ -101,7 +118,9 @@ function oc_resolve_vars($call) {
         'order_id' => oc_speakify(isset($call['order_id']) ? $call['order_id'] : ''),
         'phone'    => isset($call['phone']) ? $call['phone'] : '',
     );
-    $vars['orderId'] = $vars['order_id']; // alias
+    $vars['orderId'] = $vars['order_id'];   // legacy alias
+    $vars['reference'] = $vars['order_id']; // industry-neutral aliases so a template
+    $vars['ref'] = $vars['order_id'];       // can use {reference}/{ref} instead of {order_id}
     if (!empty($call['metadata'])) {
         $meta = is_array($call['metadata']) ? $call['metadata'] : json_decode($call['metadata'], true);
         if (is_array($meta)) {
@@ -276,11 +295,21 @@ function oc_generate_tts($config, $text, $language, $force_lang_code = null, $fo
     $gender   = $config['voice_gender'] ?: 'FEMALE';
     $rate     = isset($config['speech_rate']) && $config['speech_rate'] !== '' ? $config['speech_rate'] : 'slow';
 
+    // ElevenLabs uses two fixed, standardised voices chosen by gender, for every
+    // domain (the UI exposes only Male/Female and hides the raw voice id + model;
+    // model is always eleven_v3 — see the ElevenLabs branch below). Gender is the
+    // sole selector, so no stored/injected voice id can override it.
+    $el_voice = '';
+    if ($provider === 'elevenlabs') {
+        $el_voice = (strtoupper($gender) === 'MALE') ? 'Gubgw9l4dtIoQA9YZHgx' : 'RABOvaPec1ymXz02oDQi';
+    }
+
     $audio_dir = '/usr/share/freeswitch/sounds/custom/order_confirm/';
     if (!is_dir($audio_dir)) { @mkdir($audio_dir, 0775, true); @chmod($audio_dir, 0775); }
+    // $el_voice is part of the key so switching gender/voice never serves a stale clip.
     $path = $audio_dir . 'oc_' . md5($provider . '|' . $language . '|' . $gender . '|' . $rate . '|'
         . ($force_lang_code === null ? '~default~' : $force_lang_code) . '|' . ($force_model === null ? '' : $force_model)
-        . '|' . $prev_text . '|' . $next_text . '|' . $text) . '.wav';
+        . '|' . $el_voice . '|' . $prev_text . '|' . $next_text . '|' . $text) . '.wav';
     if (file_exists($path) && filesize($path) > 44) return 'file:' . $path; // cache
 
     $ok = false;
@@ -338,19 +367,22 @@ function oc_generate_tts($config, $text, $language, $force_lang_code = null, $fo
     // ---- ElevenLabs (mp3 output -> convert to 8kHz wav via sox) ----
     // Note: ElevenLabs FREE tier blocks API voice usage (HTTP 402); a paid
     // plan (Starter+) is required.
-    elseif ($provider === 'elevenlabs' && !empty($config['tts_elevenlabs_key']) && !empty($config['tts_elevenlabs_voice_id'])) {
-        $vid = $config['tts_elevenlabs_voice_id'];
+    elseif ($provider === 'elevenlabs' && !empty($config['tts_elevenlabs_key']) && $el_voice !== '') {
+        $vid = $el_voice; // gender-resolved (or explicit) voice id
         $body = array(
             'text' => $text,
-            'model_id' => $force_model !== null ? $force_model
-                : (!empty($config['tts_elevenlabs_model']) ? $config['tts_elevenlabs_model'] : 'eleven_multilingual_v2'),
+            // Standardised on eleven_v3 for every domain (model picker hidden in UI).
+            'model_id' => $force_model !== null ? $force_model : 'eleven_v3',
         );
         if ($force_lang_code !== null) {
             // '' means explicitly omit (caller wants auto-detect); anything
             // else is a specific forced language code.
             if ($force_lang_code !== '') $body['language_code'] = $force_lang_code;
-        } elseif (!empty($config['tts_elevenlabs_language'])) {
-            $body['language_code'] = $config['tts_elevenlabs_language'];
+        } elseif ($language === 'bn' || $language === 'en') {
+            // Follow the call's language (Default language / per-call) so the
+            // accent always matches the chosen template. Replaces the old
+            // per-domain "language override" field (removed from the UI).
+            $body['language_code'] = $language;
         }
         // Context stitching: tells the model what text comes immediately
         // before/after this fragment (without voicing it) so pronunciation
@@ -421,8 +453,88 @@ function oc_esl_connect() {
 }
 
 /**
- * Originate the outbound call into the Lua IVR.
- * $call is the v_order_confirm_calls row (array). $config is the config row.
+ * Render a template's literal text with {var} values substituted, then count
+ * its characters — the "voice SMS" size for billing. This is the plain text a
+ * human reads (name/order_id filled in), NOT the speakified char-by-char
+ * expansion. mb_strlen so multibyte (Bangla) counts as characters, not bytes.
+ * The actual per-call total is tallied live by the Lua from whatever segments
+ * really play (main message + the reply for the pressed key); this just gives
+ * each segment's size.
+ */
+function oc_char_count($template, $vars) {
+    $t = trim((string)$template);
+    if ($t === '') return 0;
+    foreach ($vars as $k => $v) $t = str_replace('{' . $k . '}', (string)$v, $t);
+    $t = trim($t);
+    if ($t === '') return 0;
+    return function_exists('mb_strlen') ? mb_strlen($t, 'UTF-8') : strlen($t);
+}
+
+/**
+ * Build everything the answered-leg IVR needs to speak: main-message audio,
+ * ack audio, the DTMF option map (each option carries its own reply audio + the
+ * reply's char size), the valid-digit string, and the voice-SMS char sizes.
+ *
+ * THIS is where ElevenLabs synthesis happens, so it is invoked ONLY after a
+ * human answers (by order-confirm-tts-cli.php, called from the IVR Lua) — never
+ * at origination. That is what makes unanswered calls and voicemail cost ZERO
+ * TTS credits. Audio specs are returned raw; the caller base64-encodes them for
+ * transport to the Lua.
+ */
+function oc_build_playback($config, $call) {
+    $language = !empty($call['language']) ? $call['language'] : ($config['default_language'] ?: 'en');
+    $tmpl = ($language === 'bn') ? $config['message_template_bn'] : $config['message_template_en'];
+    $ack_t = ($language === 'bn')
+        ? (isset($config['ack_text_bn']) ? $config['ack_text_bn'] : 'ধন্যবাদ।')
+        : (isset($config['ack_text_en']) ? $config['ack_text_en'] : 'Thank you, your response has been recorded.');
+
+    $vars = oc_resolve_vars($call);
+    $tts  = oc_generate_tts_chain($config, $tmpl, $vars, $language);
+    $ack  = oc_generate_tts_chain($config, $ack_t, $vars, $language);
+    $msg_chars = oc_char_count($tmpl, $vars);
+    $ack_chars = oc_char_count($ack_t, $vars);
+
+    // Dynamic DTMF option map (see oc_originate's original comment for the format).
+    $opts = array();
+    if (!empty($config['dtmf_options'])) {
+        $decoded = is_array($config['dtmf_options']) ? $config['dtmf_options'] : json_decode($config['dtmf_options'], true);
+        if (is_array($decoded)) $opts = $decoded;
+    }
+    if (empty($opts)) {
+        $opts = array(
+            array('digit'=>'1','label'=>'Confirm','action'=>'callback','value'=>'1'),
+            array('digit'=>'2','label'=>'Cancel','action'=>'callback','value'=>'2'),
+            array('digit'=>'0','label'=>'Support','action'=>'transfer','value'=>''),
+        );
+    }
+    // Fields: digit~action~dest~label~sayChars~sayAudioB64 (b64 has no '~').
+    $valid = ''; $lines = array();
+    foreach ($opts as $o) {
+        $d = isset($o['digit']) ? preg_replace('/[^0-9]/','',substr((string)$o['digit'],0,1)) : '';
+        if ($d === '') continue;
+        $a = isset($o['action']) ? $o['action'] : 'api';
+        if ($a === 'callback') $a = 'api';                 // legacy alias
+        $v = ($a === 'transfer')
+            ? str_replace(array("~","\n"),'', (isset($o['transferTo']) ? $o['transferTo'] : (isset($o['value']) ? $o['value'] : '')))
+            : '';
+        $l = isset($o['label']) ? str_replace(array("~","\n"),'',$o['label']) : '';
+        $sayt = ($language === 'bn') ? (isset($o['sayBn']) ? $o['sayBn'] : '') : (isset($o['sayEn']) ? $o['sayEn'] : '');
+        $sayspec = ($sayt !== '') ? oc_generate_tts_chain($config, $sayt, $vars, $language) : $ack;
+        $say_chars = ($sayt !== '') ? oc_char_count($sayt, $vars) : 0;
+        $valid .= $d;
+        $lines[] = "$d~$a~$v~$l~$say_chars~" . base64_encode($sayspec);
+    }
+    if ($valid === '') { $valid = '120'; $lines = array('1~api~1~Confirm~0~' . base64_encode($ack),
+        '2~api~2~Cancel~0~' . base64_encode($ack), '0~transfer~~Support~0~' . base64_encode($ack)); }
+
+    return array('msg' => $tts, 'ack' => $ack, 'opts_enc' => implode("\n", $lines),
+                 'valid' => $valid, 'msg_chars' => $msg_chars, 'ack_chars' => $ack_chars);
+}
+
+/**
+ * Originate the outbound call into the Lua IVR. NO TTS is generated here (that
+ * is deferred to oc_build_playback after a human answers), so an unanswered or
+ * voicemail call spends zero TTS credits. $call is the v_order_confirm_calls row.
  * Returns array(ok=>bool, fs_uuid=>string, error=>string).
  */
 function oc_originate($database, $call, $config) {
@@ -448,59 +560,12 @@ function oc_originate($database, $call, $config) {
         $gateway_uuid = $g ? $g['gateway_uuid'] : null;
     }
 
-    $language = !empty($call['language']) ? $call['language'] : ($config['default_language'] ?: 'en');
-    $tmpl = ($language === 'bn') ? $config['message_template_bn'] : $config['message_template_en'];
-    $ack_t = ($language === 'bn')
-        ? (isset($config['ack_text_bn']) ? $config['ack_text_bn'] : 'ধন্যবাদ।')
-        : (isset($config['ack_text_en']) ? $config['ack_text_en'] : 'Thank you, your response has been recorded.');
-
-    $vars = oc_resolve_vars($call);
-    $tts  = oc_generate_tts_chain($config, $tmpl, $vars, $language);
-    $ack  = oc_generate_tts_chain($config, $ack_t, $vars, $language);
-
-    // Dynamic DTMF option map. Each option: digit,label,action(callback|transfer|hangup),value.
-    $opts = array();
-    if (!empty($config['dtmf_options'])) {
-        $decoded = is_array($config['dtmf_options']) ? $config['dtmf_options'] : json_decode($config['dtmf_options'], true);
-        if (is_array($decoded)) $opts = $decoded;
-    }
-    if (empty($opts)) {
-        $opts = array(
-            array('digit'=>'1','label'=>'Confirm','action'=>'callback','value'=>'1'),
-            array('digit'=>'2','label'=>'Cancel','action'=>'callback','value'=>'2'),
-            array('digit'=>'0','label'=>'Support','action'=>'transfer','value'=>''),
-        );
-    }
-    // Encode as "digit=action=value=label" lines for the Lua (no JSON dep).
-    // The Lua only needs: what kind of action (api|transfer|hangup) and, for a
-    // transfer, where to send the call. All API details (method/url/auth/payload)
-    // are resolved by the worker from config, keyed by the pressed digit.
-    // Fields separated by '~' (not in base64), records by newline:
-    //   digit~action~transferDest~label~sayAudioB64
-    // sayAudioB64 is this option's own spoken response (per language); if the
-    // option has no say text, the global ack is used.
-    $valid = ''; $lines = array();
-    foreach ($opts as $o) {
-        $d = isset($o['digit']) ? preg_replace('/[^0-9]/','',substr((string)$o['digit'],0,1)) : '';
-        if ($d === '') continue;
-        $a = isset($o['action']) ? $o['action'] : 'api';
-        if ($a === 'callback') $a = 'api';                 // legacy alias
-        $v = ($a === 'transfer')
-            ? str_replace(array("~","\n"),'', (isset($o['transferTo']) ? $o['transferTo'] : (isset($o['value']) ? $o['value'] : '')))
-            : '';
-        $l = isset($o['label']) ? str_replace(array("~","\n"),'',$o['label']) : '';
-        // per-option spoken response
-        $sayt = ($language === 'bn') ? (isset($o['sayBn']) ? $o['sayBn'] : '') : (isset($o['sayEn']) ? $o['sayEn'] : '');
-        $sayspec = ($sayt !== '')
-            ? oc_generate_tts_chain($config, $sayt, $vars, $language)
-            : $ack;
-        $valid .= $d;
-        $lines[] = "$d~$a~$v~$l~" . base64_encode($sayspec);
-    }
-    if ($valid === '') { $valid = '120'; $lines = array('1~api~1~Confirm~' . base64_encode($ack),
-        '2~api~2~Cancel~' . base64_encode($ack), '0~transfer~~Support~' . base64_encode($ack)); }
-    $opts_enc = implode("\n", $lines);
-
+    // NOTE: no TTS is built here anymore. The audio (main message, ack, and each
+    // option's reply) is generated on demand by order-confirm-tts-cli.php, called
+    // from the IVR Lua only after a human answers. This keeps unanswered / ringing
+    // / voicemail calls at zero ElevenLabs credits. The DTMF option *control* map
+    // (digits/actions/transfer targets) is also resolved there — the Lua fetches
+    // the whole bundle in one call on answer.
     $fs_uuid = uuid();
     $support = $call['support_number'] !== '' ? $call['support_number'] : $config['default_support_number'];
     $cid_num = $config['caller_id_number'] !== '' ? $config['caller_id_number'] : $call['phone'];
@@ -524,6 +589,26 @@ function oc_originate($database, $call, $config) {
     $vars .= ",effective_caller_id_number=$cid_num";
     $vars .= ",effective_caller_id_name='$cid_name'";
     $vars .= ",absolute_codec_string='PCMU,PCMA'";        // force PCMU/PCMA
+    // Wait for a REAL answer (200 OK) before running the IVR. Without this the
+    // gateway's 183 early-media/ringback is treated as "answered", so the Lua
+    // starts and plays the whole message into the ringback stream while the
+    // customer's phone is still ringing — they pick up to silence. This also
+    // keeps the DB status honest (it only flips to 'answered' on true pickup).
+    $vars .= ",ignore_early_media=true";
+    // Report the ringing state to the dashboard. The IVR Lua only runs on true
+    // answer (ignore_early_media), so this tiny hook fires on 180 ring / 183
+    // early media and flips 'calling' -> 'ringing'. Single-quoted: value has a
+    // space so the originate {} parser must keep it as one token.
+    $vars .= ",execute_on_ring='lua order-confirm-ring.lua'";
+    $vars .= ",execute_on_media='lua order-confirm-ring.lua'";
+    // Record the REAL hangup cause the instant the leg ends and move an
+    // unanswered calling/ringing call to its terminal status immediately (no
+    // ~60-90s wait for the worker CDR backstop). api_hangup_hook is the REAL
+    // FreeSWITCH mechanism (execute_on_hangup does not exist) and fires even for
+    // unanswered legs. The ${...} are single-quoted PHP so PHP won't interpolate
+    // them; the ESL passes them literally and FreeSWITCH expands them at hangup,
+    // so hangup_cause is the actual cause. Args arrive as Lua argv (API mode).
+    $vars .= ",api_hangup_hook='lua order-confirm-hangup.lua " . '${oc_call_uuid} ${hangup_cause}' . "'";
     $vars .= ",call_timeout=$timeout";
     $vars .= ",oc_call_uuid=" . $call['call_uuid'];
     $vars .= ",oc_domain_uuid=$domain_uuid";
@@ -531,10 +616,8 @@ function oc_originate($database, $call, $config) {
     $vars .= ",oc_support=" . ($support ?: '');
     $vars .= ",oc_amd=$amd";
     $vars .= ",oc_answer_delay=" . (isset($config['answer_delay_ms']) ? intval($config['answer_delay_ms']) : 2000);
-    $vars .= ",oc_msg_b64=" . base64_encode($tts);
-    $vars .= ",oc_ack_b64=" . base64_encode($ack);
-    $vars .= ",oc_valid=" . $valid;
-    $vars .= ",oc_opts_b64=" . base64_encode($opts_enc);
+    // No oc_msg_b64 / oc_ack_b64 / oc_opts_b64 here: the IVR fetches the audio +
+    // option map on answer from order-confirm-tts-cli.php (deferred TTS).
 
     $fp = oc_esl_connect();
     if (!$fp) return array('ok' => false, 'error' => 'ESL connect failed');
@@ -548,13 +631,16 @@ function oc_originate($database, $call, $config) {
     $resp = stream_get_line($fp, 8192, "\n\n");
     fclose($fp);
 
-    // Persist the resolved playback + fs uuid on the job.
+    // Persist the fs uuid + calling state. char_count/voice_units are NOT set
+    // here — billing is answered-only, so the IVR writes them after it speaks
+    // (unanswered calls stay 0 = no charge). tts_spec likewise no longer resolved
+    // at origination.
     $database->execute(
         "UPDATE v_order_confirm_calls
-            SET fs_call_uuid = :u, tts_spec = :t, status = 'calling',
+            SET fs_call_uuid = :u, status = 'calling',
                 attempts = attempts + 1, last_attempt_date = NOW()
           WHERE call_uuid = :c",
-        array('u' => $fs_uuid, 't' => $tts, 'c' => $call['call_uuid'])
+        array('u' => $fs_uuid, 'c' => $call['call_uuid'])
     );
 
     return array('ok' => (strpos($resp, '+OK') !== false || strpos($resp, 'Job-UUID') !== false),

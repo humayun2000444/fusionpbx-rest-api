@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS v_order_confirm_config (
     call_timeout         INTEGER DEFAULT 40,               -- seconds to ring
     amd_enabled          BOOLEAN DEFAULT TRUE,             -- skip answering machines
 
+    -- Industry-neutral display labels (dashboard shows these instead of the
+    -- hardcoded Order/Customer terms; e.g. Appointment/Patient, Invoice/Recipient)
+    reference_label      VARCHAR(40) DEFAULT 'Order ID',
+    recipient_label      VARCHAR(40) DEFAULT 'Customer',
+    entity_label         VARCHAR(40) DEFAULT 'Order',
+
     -- Merchant callback (per-domain default; can be overridden per request)
     default_confirm_url  TEXT DEFAULT '',
     callback_auth_type   VARCHAR(10) DEFAULT 'none',       -- none | bearer | basic | hmac
@@ -79,6 +85,10 @@ CREATE TABLE IF NOT EXISTS v_order_confirm_calls (
     dtmf_pressed         VARCHAR(4)  DEFAULT NULL,          -- '1' | '2' | '0'
     disposition          VARCHAR(40) DEFAULT NULL,
     hangup_cause         VARCHAR(40) DEFAULT NULL,
+
+    -- voice-SMS sizing: chars actually spoken this call + 230-char billing units
+    char_count           INTEGER DEFAULT 0,
+    voice_units          INTEGER DEFAULT 0,
 
     -- attempts / retry
     attempts             INTEGER DEFAULT 0,
