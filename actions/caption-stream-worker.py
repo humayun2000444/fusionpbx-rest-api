@@ -208,7 +208,9 @@ def summarize(conn, job):
         req = urllib.request.Request(
             SUMMARY_URL, data=body,
             headers={"Authorization": "Bearer " + key,
-                     "Content-Type": "application/json"})
+                     "Content-Type": "application/json",
+                     # Groq's edge 403s the default Python-urllib user agent
+                     "User-Agent": "fusionpbx-caption-worker/1.0"})
         try:
             j = json.loads(urllib.request.urlopen(req, timeout=45).read().decode())
             summary = j["choices"][0]["message"]["content"].strip()

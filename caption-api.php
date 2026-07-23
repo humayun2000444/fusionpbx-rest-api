@@ -10,6 +10,7 @@
  *   ?key=<CAP_KEY>&action=list&call_uuid=<uuid>&after=<seq>   poll new captions
  *   ?key=<CAP_KEY>&action=stop&call_uuid=<uuid>    stop captioning
  *   ?key=<CAP_KEY>&action=summary&call_uuid=<uuid> post-call summary + transcript
+ *   ?key=<CAP_KEY>&action=history&limit=20         recent captioned calls + summaries
  *   ?key=<CAP_KEY>&action=health                   smoke check
  *
  * PoC ONLY: shared-key auth + open CORS. Replace with gateway auth for prod.
@@ -81,6 +82,32 @@ try {
         $esl = cap_esl_api('status');
         db();
         respond(array('ok' => true, 'esl' => $esl !== null, 'db' => true));
+    }
+
+    if ($action === 'history') {
+        // Recent captioned calls with their post-call summaries — the history
+        // view. Per-call transcript/captions: action=summary / action=list.
+        $limit = min(100, max(1, (int)($_GET['limit'] ?? 20)));
+        $st = db()->prepare(
+            "SELECT j.call_uuid, j.status, j.created,
+                    (SELECT count(*) FROM v_call_captions c WHERE c.call_uuid = j.call_uuid) AS captions,
+                    s.summary, s.summary_model, s.updated AS summary_updated
+               FROM v_caption_jobs j
+               LEFT JOIN v_call_summaries s ON s.call_uuid = j.call_uuid
+              ORDER BY j.created DESC LIMIT ?");
+        $st->execute(array($limit));
+        $items = array();
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $items[] = array(
+                'call_uuid' => $r['call_uuid'],
+                'status'    => $r['status'],
+                'started'   => $r['created'],
+                'captions'  => (int)$r['captions'],
+                'summary'   => $r['summary'],
+                'model'     => $r['summary_model'],
+            );
+        }
+        respond(array('ok' => true, 'items' => $items));
     }
 
     $call_uuid = strtolower(trim($_GET['call_uuid'] ?? ''));
