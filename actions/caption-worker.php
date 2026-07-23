@@ -23,11 +23,25 @@ const STT_PROVIDER = 'whisper';
 const WHISPER_URL  = 'http://103.95.96.98:5090/transcribe';
 const WHISPER_KEY  = 'whisper_ccl_key';
 
-const CHUNK_SECONDS    = 3.0;   // audio per Scribe request
 const MIN_TAIL_SECONDS = 0.6;   // flush remainder >= this on hangup
 const RMS_GATE         = 380;   // int16 RMS below this = silence/noise, skip chunk
 const JOB_MAX_AGE_MIN  = 30;    // hard stop per job
 const PIDFILE          = '/var/run/fusionpbx/caption_worker.pid';
+
+// --- VAD utterance segmentation (replaces fixed-time chunking) ---
+// A caption is emitted at the END of each spoken utterance — i.e. when the
+// speaker pauses for >= SILENCE_HANG_MS — instead of on a fixed 3 s clock.
+// Short phrases flush the moment the speaker pauses (much lower latency), and
+// words are never sliced mid-syllable (much higher accuracy: Whisper gets a
+// whole utterance with context, not a 0.7 s fragment). Non-stop speech is
+// force-cut at MAX_UTTERANCE_S so latency stays bounded.
+const FRAME_MS         = 30;      // VAD analysis frame length
+const SPEECH_RMS       = 380;     // frame int16 RMS >= this = speech
+const SILENCE_HANG_MS  = 500;     // trailing silence that ends an utterance
+const MIN_SPEECH_MS    = 350;     // ignore utterances with less speech than this
+const MAX_UTTERANCE_S  = 6.0;     // hard cut for non-stop speech
+const PRE_ROLL_MS      = 200;     // keep this much audio before speech onset
+const LOOP_SLEEP_US    = 300000;  // main poll interval, µs (was sleep(1))
 // Force STT language to avoid auto-LID mislabeling short telephony audio
 // (Scribe otherwise guesses Hindi/Devanagari for Bangla/English clips).
 // 'ben' = Bangla, 'eng' = English, '' = auto-detect.
@@ -146,6 +160,85 @@ function find_silence_cut($pcm, $bps, $target) {
     return $best;
 }
 
+/** Average all channels down to mono int16 PCM (used only for VAD analysis). */
+function mono_mix($pcm, $channels) {
+    if ($channels === 1) return $pcm;
+    $frame = $channels * 2;
+    $n = intdiv(strlen($pcm), $frame);
+    $out = '';
+    for ($i = 0; $i < $n; $i++) {
+        $base = $i * $frame;
+        $sum = 0;
+        for ($c = 0; $c < $channels; $c++) {
+            $sum += unpack('s', substr($pcm, $base + $c * 2, 2))[1];
+        }
+        $out .= pack('s', (int)($sum / $channels));
+    }
+    return $out;
+}
+
+/**
+ * Voice-activity segmentation over mono int16 PCM. Finds ONE utterance boundary
+ * per call and returns, in mono-sample units:
+ *   array('wait')                                  incomplete utterance, need more audio
+ *   array('drop', $consume)                        leading silence / blip to skip, emit nothing
+ *   array('emit', $start, $cut, $consume)          transcribe samples [$start,$cut), advance by $consume
+ * An utterance ends at >= SILENCE_HANG_MS of trailing silence, or is force-cut
+ * once it reaches MAX_UTTERANCE_S of non-stop speech.
+ */
+function vad_segment($mono, $rate, $alive) {
+    $frame     = max(1, (int)($rate * FRAME_MS / 1000.0));   // samples per frame
+    $total     = intdiv(strlen($mono), 2);
+    $hang      = (int)($rate * SILENCE_HANG_MS / 1000.0);
+    $minSpeech = (int)($rate * MIN_SPEECH_MS / 1000.0);
+    $maxUtt    = (int)($rate * MAX_UTTERANCE_S);
+    $preroll   = (int)($rate * PRE_ROLL_MS / 1000.0);
+
+    // 1) Locate speech onset.
+    $onset = -1;
+    for ($p = 0; $p + $frame <= $total; $p += $frame) {
+        if (rms16(substr($mono, $p * 2, $frame * 2)) >= SPEECH_RMS) { $onset = $p; break; }
+    }
+    if ($onset < 0) {
+        // Entire window is silence: consume it (keep one frame in case speech
+        // begins right at the tail).
+        return array('drop', max(0, $total - $frame));
+    }
+    // 2) Trim long leading silence first so the utterance starts near the head.
+    if ($onset > $preroll + $frame) {
+        return array('drop', $onset - $preroll);
+    }
+    // 3) Walk forward looking for an end-of-utterance pause or the max cap.
+    $silRun = 0; $lastSpeechEnd = $onset + $frame; $cut = -1;
+    for ($p = $onset; $p + $frame <= $total; $p += $frame) {
+        if (rms16(substr($mono, $p * 2, $frame * 2)) >= SPEECH_RMS) {
+            $silRun = 0;
+            $lastSpeechEnd = $p + $frame;
+        } else {
+            $silRun += $frame;
+            if ($silRun >= $hang) { $cut = $lastSpeechEnd; break; }   // utterance ended
+        }
+        if (($p + $frame - $onset) >= $maxUtt) { $cut = $p + $frame; break; }  // force cut
+    }
+    if ($cut < 0) {
+        // No confirmed end within the window.
+        if ($alive === false) {
+            // Call is over — flush whatever speech we have.
+            if ($lastSpeechEnd - $onset >= $minSpeech) {
+                return array('emit', max(0, $onset - $preroll), $lastSpeechEnd, $total);
+            }
+            return array('drop', $total);
+        }
+        return array('wait');   // still live: let more audio arrive
+    }
+    if ($lastSpeechEnd - $onset < $minSpeech) {
+        return array('drop', $cut);   // too little speech, skip it
+    }
+    // Consume up to $cut only (leave the trailing pause; next pass trims it as
+    // leading silence). Never eats the following utterance's onset.
+    return array('emit', max(0, $onset - $preroll), $cut, $cut);
+}
+
 /** Strip hallucinated audio-event annotations like "(phone sound)" / "[music]". */
 function clean_caption($text) {
     if ($text === null) return '';
@@ -237,58 +330,75 @@ function process_job($job) {
     $offset = (int)$job['byte_offset'];
     if ($offset < $info['data_offset']) $offset = $info['data_offset'];
 
-    $bps         = $info['rate'] * $info['channels'] * 2;   // bytes per second
-    $chunk_bytes = (int)($bps * CHUNK_SECONDS);
+    $ch          = $info['channels'];
+    $rate        = $info['rate'];
+    $frame_bytes = $ch * 2;
+    $bps         = $rate * $frame_bytes;                    // bytes per second
     $alive       = call_alive($job['call_uuid']);
     $avail       = $size - $offset;
 
-    if ($avail >= $chunk_bytes || ($alive === false && $avail >= $bps * MIN_TAIL_SECONDS)) {
-        $frame_bytes = $info['channels'] * 2;
-        // Read the target chunk plus a little extra to find a silence boundary.
-        $read_len = min($avail, $chunk_bytes + (int)($bps * 0.4));
-        $fh = fopen($path, 'rb');
-        fseek($fh, $offset);
-        $win = fread($fh, $read_len);
-        fclose($fh);
+    // Read at most one max-length utterance (+ hang + slack) per pass.
+    $max_read = (int)($bps * (MAX_UTTERANCE_S + SILENCE_HANG_MS / 1000.0 + 0.5));
+    // While the call is live, wait until enough audio exists to possibly hold a
+    // complete short utterance; otherwise we'd rescan the same bytes every tick.
+    $min_read = (int)($bps * (MIN_SPEECH_MS / 1000.0 + SILENCE_HANG_MS / 1000.0 + 0.1));
+    if ($alive !== false && $avail < $min_read) return;
 
-        // How much to consume this round: snap to a pause (live) or flush all (ended).
-        if ($alive === false) {
-            $cut = strlen($win);
-        } else {
-            $cut = find_silence_cut($win, $bps, min($chunk_bytes, strlen($win)));
-        }
-        $cut -= $cut % $frame_bytes;
-        if ($cut < $frame_bytes) $cut = min(strlen($win), $chunk_bytes);
-        $chunk = substr($win, 0, $cut);
-        $offset += strlen($chunk);
-
-        // Per-speaker streams for stereo; single stream for mono.
-        $streams = ($info['channels'] === 2)
-            ? array(array(0, deinterleave($chunk, 0)), array(1, deinterleave($chunk, 1)))
-            : array(array(null, $chunk));
-
-        foreach ($streams as $s) {
-            list($spk, $mono) = $s;
-            if (rms16($mono) < RMS_GATE) continue;            // this speaker silent this chunk
-            // Pad ~300ms silence both sides so VAD doesn't clip the first/last word.
-            $pad  = str_repeat("\x00", (int)($info['rate'] * 2 * 0.3));
-            list($text, $lang, $err) = stt_transcribe(make_wav($pad . $mono . $pad, $info['rate'], 1));
-            if ($err !== null) { logmsg("job {$job['job_uuid']} scribe error: $err"); continue; }
-            $text = clean_caption($text);
-            if ($text === '') continue;
-            $seq = (int)$job['seq'] + 1;
-            $job['seq'] = $seq;
-            db()->prepare("INSERT INTO v_call_captions (caption_uuid, call_uuid, seq, speaker, caption_text, caption_language) VALUES (?, ?, ?, ?, ?, ?)")
-                ->execute(array(cap_uuid4(), $job['call_uuid'], $seq, $spk, $text, $lang));
-            logmsg("job {$job['job_uuid']} seq $seq spk " . ($spk === null ? '-' : $spk) . " [$lang] " . mb_substr($text, 0, 70));
-        }
-
-        db()->prepare("UPDATE v_caption_jobs SET seq = ?, byte_offset = ?, updated = now() WHERE job_uuid = ?")
-            ->execute(array((int)$job['seq'], $offset, $job['job_uuid']));
-
+    $read_len = min($avail, $max_read);
+    $read_len -= $read_len % $frame_bytes;
+    if ($read_len < $frame_bytes) {
         if ($alive === false && ($size - $offset) < $bps * MIN_TAIL_SECONDS) finish($job, 'done');
         return;
     }
+
+    $fh = fopen($path, 'rb');
+    fseek($fh, $offset);
+    $win = fread($fh, $read_len);
+    fclose($fh);
+
+    // Segment on the speech activity of the summed (mono) audio.
+    $mono = mono_mix($win, $ch);
+    $seg  = vad_segment($mono, $rate, $alive);
+
+    if ($seg[0] === 'wait') {
+        return;   // incomplete utterance, call still live — retry next tick
+    }
+
+    if ($seg[0] === 'drop') {
+        $offset += $seg[1] * $frame_bytes;
+        db()->prepare("UPDATE v_caption_jobs SET byte_offset = ?, updated = now() WHERE job_uuid = ?")
+            ->execute(array($offset, $job['job_uuid']));
+        if ($alive === false && ($size - $offset) < $bps * MIN_TAIL_SECONDS) finish($job, 'done');
+        return;
+    }
+
+    // $seg = array('emit', $startSample, $cutSample, $consumeSample) — mono-sample units.
+    $chunk = substr($win, $seg[1] * $frame_bytes, ($seg[2] - $seg[1]) * $frame_bytes);
+    $offset += $seg[3] * $frame_bytes;
+
+    // Per-speaker streams for stereo; single stream for mono.
+    $streams = ($ch === 2)
+        ? array(array(0, deinterleave($chunk, 0)), array(1, deinterleave($chunk, 1)))
+        : array(array(null, $chunk));
+
+    foreach ($streams as $s) {
+        list($spk, $sig) = $s;
+        if (rms16($sig) < RMS_GATE) continue;               // this speaker silent this utterance
+        // Pad ~300ms silence both sides so VAD doesn't clip the first/last word.
+        $pad = str_repeat("\x00", (int)($rate * 2 * 0.3));
+        list($text, $lang, $err) = stt_transcribe(make_wav($pad . $sig . $pad, $rate, 1));
+        if ($err !== null) { logmsg("job {$job['job_uuid']} stt error: $err"); continue; }
+        $text = clean_caption($text);
+        if ($text === '') continue;
+        $seq = (int)$job['seq'] + 1;
+        $job['seq'] = $seq;
+        db()->prepare("INSERT INTO v_call_captions (caption_uuid, call_uuid, seq, speaker, caption_text, caption_language) VALUES (?, ?, ?, ?, ?, ?)")
+            ->execute(array(cap_uuid4(), $job['call_uuid'], $seq, $spk, $text, $lang));
+        logmsg("job {$job['job_uuid']} seq $seq spk " . ($spk === null ? '-' : $spk) . " [$lang] " . mb_substr($text, 0, 70));
+    }
+
+    db()->prepare("UPDATE v_caption_jobs SET seq = ?, byte_offset = ?, updated = now() WHERE job_uuid = ?")
+        ->execute(array((int)$job['seq'], $offset, $job['job_uuid']));
 
     if ($alive === false && ($size - $offset) < $bps * MIN_TAIL_SECONDS) finish($job, 'done');
 }
@@ -316,5 +426,5 @@ while (true) {
         logmsg('loop error: ' . $e->getMessage());
         sleep(3);
     }
-    sleep(1);
+    usleep(LOOP_SLEEP_US);
 }
