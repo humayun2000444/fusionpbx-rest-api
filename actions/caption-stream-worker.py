@@ -37,23 +37,47 @@ import psycopg2.extras
 import websockets
 
 # ---- config -----------------------------------------------------------------
-DB_DSN = "host=127.0.0.1 dbname=fusionpbx user=fusionpbx password=Takay1takaane"
-XI_KEY = "sk_7d78907af456db3a031a893334fc328b23563d790de8ef6f"
+# Per-server settings live in /etc/fusionpbx/caption.conf (plain KEY=value
+# lines — see caption.conf.example / DEPLOY-CAPTIONS.md). Values below are the
+# defaults used when the file or a key is absent.
+def _load_conf(path="/etc/fusionpbx/caption.conf"):
+    cfg = {}
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return cfg
+
+
+_CFG = _load_conf()
+DB_DSN = "host=%s dbname=%s user=%s password=%s" % (
+    _CFG.get("DB_HOST", "127.0.0.1"), _CFG.get("DB_NAME", "fusionpbx"),
+    _CFG.get("DB_USER", "fusionpbx"), _CFG.get("DB_PASS", "Takay1takaane"))
+XI_KEY = _CFG.get("XI_KEY", "sk_7d78907af456db3a031a893334fc328b23563d790de8ef6f")
 
 WS_BASE = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
-STT_MODEL = "scribe_v2_realtime"
-LANG = "ben"                      # forced language; server normalizes to 'bn'
+STT_MODEL = _CFG.get("STT_MODEL", "scribe_v2_realtime")
+LANG = _CFG.get("STT_LANGUAGE", "ben")   # forced language; server normalizes to 'bn'
 VAD_SILENCE_SECS = 0.5            # server-side commit after this much silence
 
-SUMMARY_MODEL = "llama-3.3-70b-versatile"
+SUMMARY_MODEL = _CFG.get("SUMMARY_MODEL", "llama-3.3-70b-versatile")
 SUMMARY_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_KEY = _CFG.get("GROQ_KEY", "")   # falls back to the DB lookup when empty
 
 JOB_MAX_AGE_MIN = 30              # hard stop per job
 RECORD_WAIT_SECS = 20             # fail job if WAV never appears
 POLL_SECS = 0.3                   # jobs-table poll interval
 TAIL_SECS = 0.1                   # file tail interval (chunk pacing)
 MAX_CHUNK_SECS = 1.0              # cap per ws message when draining backlog
-ESL_HOST, ESL_PORT, ESL_PASS = "127.0.0.1", 8021, "ClueCon"
+ESL_HOST = _CFG.get("ESL_HOST", "127.0.0.1")
+ESL_PORT = int(_CFG.get("ESL_PORT", "8021"))
+ESL_PASS = _CFG.get("ESL_PASS", "ClueCon")
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                     format="[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -175,11 +199,18 @@ async def insert_caption(conn, job, speaker, text, lang):
 
 
 def groq_key(conn):
-    with conn.cursor() as cur:
-        cur.execute("SELECT tts_openai_key FROM v_order_confirm_config"
-                    " WHERE coalesce(tts_openai_key,'')<>'' LIMIT 1")
-        r = cur.fetchone()
-    return r[0] if r else None
+    if GROQ_KEY:
+        return GROQ_KEY
+    # Legacy fallback: ops keeps the Groq key in the order-confirm config table.
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT tts_openai_key FROM v_order_confirm_config"
+                        " WHERE coalesce(tts_openai_key,'')<>'' LIMIT 1")
+            r = cur.fetchone()
+        return r[0] if r else None
+    except psycopg2.Error:
+        conn.rollback()
+        return None
 
 
 def summarize(conn, job):

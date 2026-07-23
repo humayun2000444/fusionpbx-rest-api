@@ -1,0 +1,32 @@
+# Live-caption per-server settings.
+# Copy to /etc/fusionpbx/caption.conf and edit for THIS server, then
+# `systemctl restart caption-stream-worker`. Any key you omit falls back to
+# the built-in default. Quote values that contain special characters.
+
+# Shared key the dashboard sends as ?key=... — generate a fresh one per server:
+#   openssl rand -hex 12
+CAP_KEY = "cap_CHANGE_ME"
+
+# PostgreSQL (same DB FusionPBX uses; password is in /etc/fusionpbx/config.conf)
+DB_HOST = "127.0.0.1"
+DB_NAME = "fusionpbx"
+DB_USER = "fusionpbx"
+DB_PASS = "CHANGE_ME"
+
+# ElevenLabs API key (speech-to-text, both realtime and batch)
+XI_KEY = "sk_CHANGE_ME"
+
+# Groq API key for post-call summaries. If empty, the worker falls back to
+# v_order_confirm_config.tts_openai_key in the DB (legacy CCL behavior).
+GROQ_KEY = "gsk_CHANGE_ME"
+
+# Forced STT language (ISO 639-3), e.g. ben / eng. Empty = auto-detect.
+STT_LANGUAGE = "ben"
+
+# Optional overrides (defaults are usually right)
+#STT_MODEL = "scribe_v2_realtime"
+#SUMMARY_MODEL = "llama-3.3-70b-versatile"
+#REC_DIR = "/var/lib/freeswitch/recordings/captions"
+#ESL_HOST = "127.0.0.1"
+#ESL_PORT = "8021"
+#ESL_PASS = "ClueCon"

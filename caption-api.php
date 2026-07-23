@@ -22,11 +22,15 @@ header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') { http_response_code(204); exit; }
 
-const CAP_KEY  = 'cap_ccl_f31b9d2c7a55';
-const DB_DSN   = 'pgsql:host=127.0.0.1;dbname=fusionpbx';
-const DB_USER  = 'fusionpbx';
-const DB_PASS  = 'Takay1takaane';
-const REC_DIR  = '/var/lib/freeswitch/recordings/captions';
+// Per-server settings: /etc/fusionpbx/caption.conf overrides these defaults
+// (plain KEY=value lines — see caption.conf.example / DEPLOY-CAPTIONS.md).
+$__cfg = @parse_ini_file('/etc/fusionpbx/caption.conf') ?: array();
+define('CAP_KEY', $__cfg['CAP_KEY'] ?? 'cap_ccl_f31b9d2c7a55');
+define('DB_DSN', 'pgsql:host=' . ($__cfg['DB_HOST'] ?? '127.0.0.1')
+    . ';dbname=' . ($__cfg['DB_NAME'] ?? 'fusionpbx'));
+define('DB_USER', $__cfg['DB_USER'] ?? 'fusionpbx');
+define('DB_PASS', $__cfg['DB_PASS'] ?? 'Takay1takaane');
+define('REC_DIR', $__cfg['REC_DIR'] ?? '/var/lib/freeswitch/recordings/captions');
 
 function respond($arr, $code = 200) {
     http_response_code($code);
