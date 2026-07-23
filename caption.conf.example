@@ -23,6 +23,12 @@ GROQ_KEY = "gsk_CHANGE_ME"
 # Forced STT language (ISO 639-3), e.g. ben / eng. Empty = auto-detect.
 STT_LANGUAGE = "ben"
 
+# Accuracy tuning
+SECONDARY_LANGS = "eng"    # extra code-switch languages (comma-sep); "" = off
+FILTER_BG = "true"         # server-side background-noise filtering
+KEYTERMS = ""              # comma-sep bias words (company/product/agent names)
+VAD_SILENCE_SECS = "0.5"   # pause that ends an utterance; higher = more context/accuracy, more latency
+
 # Optional overrides (defaults are usually right)
 #STT_MODEL = "scribe_v2_realtime"
 #SUMMARY_MODEL = "llama-3.3-70b-versatile"

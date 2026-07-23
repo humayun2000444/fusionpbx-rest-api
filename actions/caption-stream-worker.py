@@ -64,7 +64,11 @@ XI_KEY = _CFG.get("XI_KEY", "sk_7d78907af456db3a031a893334fc328b23563d790de8ef6f
 WS_BASE = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
 STT_MODEL = _CFG.get("STT_MODEL", "scribe_v2_realtime")
 LANG = _CFG.get("STT_LANGUAGE", "ben")   # forced language; server normalizes to 'bn'
-VAD_SILENCE_SECS = 0.5            # server-side commit after this much silence
+# Accuracy options (verified against the realtime API 2026-07-23):
+SECONDARY_LANGS = _CFG.get("SECONDARY_LANGS", "eng")  # code-switch languages, comma-sep; '' = off
+FILTER_BG = _CFG.get("FILTER_BG", "true").lower() != "false"  # server-side noise filter
+KEYTERMS = _CFG.get("KEYTERMS", "")   # comma-sep bias terms (names/products); '' = off
+VAD_SILENCE_SECS = float(_CFG.get("VAD_SILENCE_SECS", "0.5"))  # commit after this much silence
 
 SUMMARY_MODEL = _CFG.get("SUMMARY_MODEL", "llama-3.3-70b-versatile")
 SUMMARY_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -296,9 +300,18 @@ def finish(conn, job, status):
 
 # ---- websocket streaming ----------------------------------------------------
 async def ws_connect(rate):
-    url = (WS_BASE + "?model_id=%s&language_code=%s&audio_format=%s"
-           "&commit_strategy=vad&vad_silence_threshold_secs=%s"
-           % (STT_MODEL, LANG, audio_format_for(rate), VAD_SILENCE_SECS))
+    import urllib.parse
+    params = {"model_id": STT_MODEL, "language_code": LANG,
+              "audio_format": audio_format_for(rate),
+              "commit_strategy": "vad",
+              "vad_silence_threshold_secs": VAD_SILENCE_SECS}
+    if FILTER_BG:
+        params["filter_background_audio"] = "true"
+    if SECONDARY_LANGS:
+        params["secondary_languages"] = SECONDARY_LANGS
+    if KEYTERMS:
+        params["keyterms"] = KEYTERMS
+    url = WS_BASE + "?" + urllib.parse.urlencode(params)
     try:
         return await websockets.connect(url, extra_headers={"xi-api-key": XI_KEY},
                                         max_size=None)
