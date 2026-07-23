@@ -4,7 +4,7 @@
  *
  * Tails the growing uuid_record WAV of each active caption job, segments it into
  * utterances on speech pauses (VAD), and sends each utterance to a speech-to-text
- * backend — self-hosted Whisper by default (STT_PROVIDER), ElevenLabs Scribe
+ * backend — ElevenLabs Scribe by default (STT_PROVIDER), self-hosted Whisper
  * optional — then stores caption rows for the dashboard to poll via caption-api.php.
  *
  * Run:  nohup /usr/bin/php /var/www/fusionpbx/app/rest_api/actions/caption-worker.php \
@@ -19,8 +19,12 @@ const DB_USER = 'fusionpbx';
 const DB_PASS = 'Takay1takaane';
 const XI_KEY  = 'sk_7d78907af456db3a031a893334fc328b23563d790de8ef6f';
 
-// STT backend: 'whisper' (self-hosted Bangla fine-tune on .98) | 'scribe' (ElevenLabs)
-const STT_PROVIDER = 'whisper';
+// STT backend: 'scribe' (ElevenLabs) | 'whisper' (self-hosted Bangla fine-tune on .98)
+// Benchmarked 2026-07-23 on real call audio: scribe = full words + punctuation +
+// code-switching at ~1s/clip; whisper on .98 = drops the first consonant of every
+// segment and runs 2.5-4s/clip. Keep whisper as offline/on-prem fallback only
+// until the .98 first-token bug is fixed.
+const STT_PROVIDER = 'scribe';
 const WHISPER_URL  = 'http://103.95.96.98:5090/transcribe';
 const WHISPER_KEY  = 'whisper_ccl_key';
 
@@ -38,15 +42,11 @@ const PIDFILE          = '/var/run/fusionpbx/caption_worker.pid';
 // force-cut at MAX_UTTERANCE_S so latency stays bounded.
 const FRAME_MS         = 30;      // VAD analysis frame length
 const SPEECH_RMS       = 380;     // frame int16 RMS >= this = speech (validated vs noise floor ~27-114)
-// Segment at PHRASE level, not per word. The .98 Whisper model drops the first
-// consonant of every segment it transcribes (proven: internal words fine, only
-// the utterance-initial token is lost, at any lead-in). Longer segments => that
-// loss happens once per phrase instead of once per word, so captions stay
-// readable. Raise SILENCE_HANG_MS further for longer phrases / fewer losses
-// (costs latency); the real fix is on .98. Also: .98 is ~4x more efficient on
-// long clips than tiny ones, so phrase-level helps throughput too.
-const SILENCE_HANG_MS  = 1000;    // trailing silence that ends a phrase (was 500)
-const MIN_SPEECH_MS    = 500;     // ignore phrases with less speech than this (was 350)
+// With scribe there is no first-token drop, so utterances can flush on a short
+// pause for low latency. (If you switch back to whisper/.98, raise
+// SILENCE_HANG_MS to ~1000 to mask its first-consonant-per-segment bug.)
+const SILENCE_HANG_MS  = 500;     // trailing silence that ends an utterance
+const MIN_SPEECH_MS    = 350;     // ignore utterances with less speech than this
 const MAX_UTTERANCE_S  = 6.0;     // hard cut for non-stop speech
 const PRE_ROLL_MS      = 200;     // keep this much audio before speech onset
 const LOOP_SLEEP_US    = 300000;  // main poll interval, µs (was sleep(1))
