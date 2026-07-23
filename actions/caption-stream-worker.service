@@ -1,0 +1,18 @@
+[Unit]
+Description=Live Caption Stream Worker (ElevenLabs Scribe v2 Realtime)
+After=network-online.target postgresql.service freeswitch.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /var/www/fusionpbx/app/rest_api/actions/caption-stream-worker.py
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/caption_stream_worker.log
+StandardError=append:/var/log/caption_stream_worker.log
+# pip --user install of websockets lives under telcobright; run with its HOME
+User=root
+Environment=PYTHONPATH=/home/telcobright/.local/lib/python3.8/site-packages
+
+[Install]
+WantedBy=multi-user.target

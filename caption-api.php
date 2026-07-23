@@ -9,6 +9,7 @@
  *   ?key=<CAP_KEY>&action=start&call_uuid=<uuid>   start captioning a live call
  *   ?key=<CAP_KEY>&action=list&call_uuid=<uuid>&after=<seq>   poll new captions
  *   ?key=<CAP_KEY>&action=stop&call_uuid=<uuid>    stop captioning
+ *   ?key=<CAP_KEY>&action=summary&call_uuid=<uuid> post-call summary + transcript
  *   ?key=<CAP_KEY>&action=health                   smoke check
  *
  * PoC ONLY: shared-key auth + open CORS. Replace with gateway auth for prod.
@@ -136,6 +137,23 @@ try {
             );
         }
         respond(array('ok' => true, 'status' => $jrow ? $jrow['status'] : null, 'items' => $items));
+    }
+
+    if ($action === 'summary') {
+        // Post-call summary + transcript (written by caption-stream-worker.py
+        // after the call ends). Join against call logs/CDR by call_uuid.
+        $st = db()->prepare(
+            "SELECT summary, transcript, summary_model, created, updated
+               FROM v_call_summaries WHERE call_uuid = ? LIMIT 1");
+        $st->execute(array($call_uuid));
+        if ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+            respond(array('ok' => true, 'ready' => $row['summary'] !== null,
+                'summary' => $row['summary'], 'transcript' => $row['transcript'],
+                'model' => $row['summary_model'], 'created' => $row['created'],
+                'updated' => $row['updated']));
+        }
+        respond(array('ok' => true, 'ready' => false, 'summary' => null,
+            'transcript' => null));
     }
 
     if ($action === 'stop') {
