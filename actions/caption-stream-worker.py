@@ -194,16 +194,27 @@ def summarize(conn, job):
         "%s: %s" % ("Speaker A" if (s or 0) == 0 else "Speaker B", t) for s, t in rows)
     key = groq_key(conn)
     summary, model_used = None, None
+    sentiment, caller_mood, situation = None, None, None
     if key:
         prompt = (
-            "নিচে একটি কল সেন্টারের ফোন কলের ট্রান্সক্রিপ্ট আছে (বাংলা ও ইংরেজি মিশ্রিত"
-            " হতে পারে)। বাংলায় লিখুন:\n"
-            "১. সারসংক্ষেপ (২-৩ বাক্য)\n২. মূল বিষয়সমূহ (বুলেট)\n"
-            "৩. করণীয়/অ্যাকশন আইটেম (থাকলে)\n\nট্রান্সক্রিপ্ট:\n" + transcript[:12000])
+            "আপনি একজন অভিজ্ঞ কল সেন্টার সুপারভাইজার। নিচের ফোন কল ট্রান্সক্রিপ্টটি"
+            " পড়ে একজন মানুষ যেভাবে সহকর্মীকে গল্পের মতো করে বলে, সেভাবে স্বাভাবিক"
+            " বাংলায় বর্ণনা করুন — কে ফোন করেছিল, কী চেয়েছিল, কথোপকথনের সময় তাদের"
+            " মেজাজ/আবেগ কেমন ছিল (রাগ, বিরক্তি, খুশি, উদ্বেগ, স্বস্তি ইত্যাদি),"
+            " এবং শেষে কী হলো। রোবটের মতো তালিকা নয় — প্রাণবন্ত, সহজ ভাষা।\n\n"
+            "শুধু নিচের JSON ফরম্যাটে উত্তর দিন:\n"
+            "{\"summary\": \"৪-৬ বাক্যের মানবিক বর্ণনা (আবেগসহ)\",\n"
+            " \"sentiment\": \"positive|neutral|negative\",\n"
+            " \"caller_mood\": \"কলারের মেজাজ ১-২ শব্দে (যেমন: বিরক্ত, শান্ত, খুশি,"
+            " রাগান্বিত, উদ্বিগ্ন, হতাশ)\",\n"
+            " \"situation\": \"কলারের পরিস্থিতি এক লাইনে\",\n"
+            " \"action_items\": [\"করণীয় (থাকলে)\"]}\n\n"
+            "ট্রান্সক্রিপ্ট (বাংলা-ইংরেজি মিশ্রিত হতে পারে):\n" + transcript[:12000])
         body = json.dumps({
             "model": SUMMARY_MODEL,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3, "max_tokens": 700,
+            "response_format": {"type": "json_object"},
+            "temperature": 0.4, "max_tokens": 900,
         }).encode()
         req = urllib.request.Request(
             SUMMARY_URL, data=body,
@@ -213,20 +224,32 @@ def summarize(conn, job):
                      "User-Agent": "fusionpbx-caption-worker/1.0"})
         try:
             j = json.loads(urllib.request.urlopen(req, timeout=45).read().decode())
-            summary = j["choices"][0]["message"]["content"].strip()
+            raw = j["choices"][0]["message"]["content"].strip()
+            try:
+                data = json.loads(raw)
+            except ValueError:   # model wrapped it in prose/fences — salvage
+                data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+            summary = (data.get("summary") or "").strip() or None
+            sentiment = (data.get("sentiment") or "").strip().lower() or None
+            caller_mood = (data.get("caller_mood") or "").strip() or None
+            situation = (data.get("situation") or "").strip() or None
+            items = [str(x).strip() for x in (data.get("action_items") or []) if str(x).strip()]
+            if summary and items:
+                summary += "\n\nকরণীয়:\n" + "\n".join("• " + x for x in items)
             model_used = SUMMARY_MODEL
         except Exception as e:  # noqa: BLE001 - summary is best-effort
             log.info("job %s summary error: %s", job.row["job_uuid"], str(e)[:180])
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO v_call_summaries (summary_uuid, call_uuid, job_uuid,"
-            " transcript, summary, summary_model)"
-            " VALUES (%s,%s,%s,%s,%s,%s)"
+            " transcript, summary, summary_model, sentiment, caller_mood, situation)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
             " ON CONFLICT (call_uuid) DO UPDATE SET transcript=EXCLUDED.transcript,"
             " summary=EXCLUDED.summary, summary_model=EXCLUDED.summary_model,"
-            " updated=now()",
+            " sentiment=EXCLUDED.sentiment, caller_mood=EXCLUDED.caller_mood,"
+            " situation=EXCLUDED.situation, updated=now()",
             (uuid4(), job.row["call_uuid"], job.row["job_uuid"],
-             transcript, summary, model_used))
+             transcript, summary, model_used, sentiment, caller_mood, situation))
     log.info("job %s summary %s", job.row["job_uuid"],
              "saved" if summary else "saved (transcript only, no LLM)")
 

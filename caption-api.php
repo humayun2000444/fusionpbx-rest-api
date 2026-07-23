@@ -91,7 +91,7 @@ try {
         $st = db()->prepare(
             "SELECT j.call_uuid, j.status, j.created,
                     (SELECT count(*) FROM v_call_captions c WHERE c.call_uuid = j.call_uuid) AS captions,
-                    s.summary, s.summary_model, s.updated AS summary_updated
+                    s.summary, s.summary_model, s.sentiment, s.caller_mood, s.situation, s.updated AS summary_updated
                FROM v_caption_jobs j
                LEFT JOIN v_call_summaries s ON s.call_uuid = j.call_uuid
               ORDER BY j.created DESC LIMIT ?");
@@ -104,6 +104,9 @@ try {
                 'started'   => $r['created'],
                 'captions'  => (int)$r['captions'],
                 'summary'   => $r['summary'],
+                'sentiment' => $r['sentiment'],
+                'caller_mood' => $r['caller_mood'],
+                'situation' => $r['situation'],
                 'model'     => $r['summary_model'],
             );
         }
@@ -170,7 +173,7 @@ try {
         // Post-call summary + transcript (written by caption-stream-worker.py
         // after the call ends). Join against call logs/CDR by call_uuid.
         $st = db()->prepare(
-            "SELECT summary, transcript, summary_model, created, updated
+            "SELECT summary, transcript, summary_model, sentiment, caller_mood, situation, created, updated
                FROM v_call_summaries WHERE call_uuid = ? LIMIT 1");
         $st->execute(array($call_uuid));
         $row = $st->fetch(PDO::FETCH_ASSOC);
@@ -178,7 +181,7 @@ try {
             // Captions may have run on the other leg of this call: match via the
             // CDR's bridge/originating leg uuids in both directions.
             $st = db()->prepare(
-                "SELECT s.summary, s.transcript, s.summary_model, s.created, s.updated
+                "SELECT s.summary, s.transcript, s.summary_model, s.sentiment, s.caller_mood, s.situation, s.created, s.updated
                    FROM v_call_summaries s
                   WHERE s.call_uuid::text IN (
                         SELECT bridge_uuid::text FROM v_xml_cdr
@@ -197,6 +200,8 @@ try {
         if ($row) {
             respond(array('ok' => true, 'ready' => $row['summary'] !== null,
                 'summary' => $row['summary'], 'transcript' => $row['transcript'],
+                'sentiment' => $row['sentiment'], 'caller_mood' => $row['caller_mood'],
+                'situation' => $row['situation'],
                 'model' => $row['summary_model'], 'created' => $row['created'],
                 'updated' => $row['updated']));
         }
