@@ -2,9 +2,10 @@
 /**
  * caption-worker.php — live-caption daemon (PoC).
  *
- * Tails the growing uuid_record WAV of each active caption job, slices ~4 s
- * chunks, sends speechy chunks to ElevenLabs Scribe (speech-to-text), and
- * stores caption rows for the dashboard to poll via caption-api.php.
+ * Tails the growing uuid_record WAV of each active caption job, segments it into
+ * utterances on speech pauses (VAD), and sends each utterance to a speech-to-text
+ * backend — self-hosted Whisper by default (STT_PROVIDER), ElevenLabs Scribe
+ * optional — then stores caption rows for the dashboard to poll via caption-api.php.
  *
  * Run:  nohup /usr/bin/php /var/www/fusionpbx/app/rest_api/actions/caption-worker.php \
  *         > /var/log/caption_worker.log 2>&1 &
