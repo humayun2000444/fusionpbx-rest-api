@@ -173,7 +173,28 @@ try {
             "SELECT summary, transcript, summary_model, created, updated
                FROM v_call_summaries WHERE call_uuid = ? LIMIT 1");
         $st->execute(array($call_uuid));
-        if ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            // Captions may have run on the other leg of this call: match via the
+            // CDR's bridge/originating leg uuids in both directions.
+            $st = db()->prepare(
+                "SELECT s.summary, s.transcript, s.summary_model, s.created, s.updated
+                   FROM v_call_summaries s
+                  WHERE s.call_uuid::text IN (
+                        SELECT bridge_uuid::text FROM v_xml_cdr
+                         WHERE xml_cdr_uuid::text = ? AND coalesce(bridge_uuid,'') <> ''
+                        UNION
+                        SELECT originating_leg_uuid::text FROM v_xml_cdr
+                         WHERE xml_cdr_uuid::text = ? AND coalesce(originating_leg_uuid::text,'') <> ''
+                        UNION
+                        SELECT xml_cdr_uuid::text FROM v_xml_cdr WHERE bridge_uuid::text = ?
+                        UNION
+                        SELECT xml_cdr_uuid::text FROM v_xml_cdr WHERE originating_leg_uuid::text = ?)
+                  LIMIT 1");
+            $st->execute(array($call_uuid, $call_uuid, $call_uuid, $call_uuid));
+            $row = $st->fetch(PDO::FETCH_ASSOC);
+        }
+        if ($row) {
             respond(array('ok' => true, 'ready' => $row['summary'] !== null,
                 'summary' => $row['summary'], 'transcript' => $row['transcript'],
                 'model' => $row['summary_model'], 'created' => $row['created'],
