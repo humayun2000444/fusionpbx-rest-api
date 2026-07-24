@@ -54,7 +54,7 @@ PVAR_NEUTRAL = 0.35
 DYN_NEUTRAL = 1.5
 NO_BASE_AROUSAL = 0.2     # before a baseline exists we can't judge — stay calm
 SHORT_UTT_SECS = 0.45     # below this, ratios are unreliable (one-word bursts)
-SHORT_CAP = 0.5           # a short burst can flag "tense" at most, never alarm
+SHORT_CAP = 0.35          # a short/unreliable fragment reads calm, never flags
 
 # canonical tone enum (stored in v_call_captions.voice_tone; UI localizes/colors)
 TONE_CALM = "calm"
@@ -348,11 +348,11 @@ class SpeakerBaseline:
         # ratios are the reliable signals; pitch_var & dyn only nudge (realistic
         # neutral points, low weight) because they are noisy at 8 kHz.
         z = (3.0 * (e_ratio - 1.0)                  # louder than own norm
-             + 3.6 * (f_ratio - 1.0)                # higher pitched than own norm
-             + 1.2 * max(0.0, r_ratio - 1.0)        # faster (only faster raises)
+             + 4.2 * (f_ratio - 1.0)                # higher pitched than own norm
+             + 1.4 * max(0.0, r_ratio - 1.0)        # faster (only faster raises)
              + 0.5 * (pvar - PVAR_NEUTRAL)          # weak: instability above norm
              + 0.4 * (dyn - DYN_NEUTRAL))           # weak: punchy loudness swings
-        arousal = _sig(0.9 * z - 1.6)
+        arousal = _sig(0.95 * z - 1.55)
         if short:
             arousal = min(arousal, SHORT_CAP)       # one-word bursts can't alarm
 
