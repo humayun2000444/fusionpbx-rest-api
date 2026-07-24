@@ -24,6 +24,8 @@ NOT wired into the daemon — standalone so we can eyeball the JSON on real call
 import json
 import re
 import sys
+import time
+import urllib.error
 import urllib.request
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -184,16 +186,27 @@ def llm_classify(transcript, groq_key):
     req = urllib.request.Request(GROQ_URL, data=body, headers={
         "Authorization": "Bearer " + groq_key, "Content-Type": "application/json",
         "User-Agent": "fusionpbx-999-proto/1.0"})
-    try:
-        raw = urllib.request.urlopen(req, timeout=45).read().decode()
-        content = json.loads(raw)["choices"][0]["message"]["content"]
+    delay = 2.0
+    for attempt in range(5):
         try:
-            return json.loads(content)
-        except ValueError:
-            return json.loads(content[content.index("{"):content.rindex("}") + 1])
-    except Exception as e:  # noqa: BLE001
-        print("  [LLM error: %s]" % str(e)[:160], file=sys.stderr)
-        return {}
+            raw = urllib.request.urlopen(req, timeout=45).read().decode()
+            content = json.loads(raw)["choices"][0]["message"]["content"]
+            try:
+                return json.loads(content)
+            except ValueError:
+                return json.loads(content[content.index("{"):content.rindex("}") + 1])
+        except urllib.error.HTTPError as e:
+            # back off on rate-limit / transient upstream and retry
+            if e.code in (429, 500, 502, 503) and attempt < 4:
+                time.sleep(delay)
+                delay = min(delay * 2, 20)
+                continue
+            print("  [LLM HTTP %s]" % e.code, file=sys.stderr)
+            return {}
+        except Exception as e:  # noqa: BLE001
+            print("  [LLM error: %s]" % str(e)[:160], file=sys.stderr)
+            return {}
+    return {}
 
 
 def classify(transcript, groq_key, caller_id="999XXXXXXX", voice_emotion=None):
