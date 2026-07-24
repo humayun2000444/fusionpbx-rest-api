@@ -408,6 +408,32 @@ def summarize(conn, job):
              "saved" if summary else "saved (transcript only, no LLM)")
 
 
+# prosody tone -> the spec's voice-emotion vocabulary (999 triage `emotion`)
+_TONE_TO_EMOTION = {"calm": "calm", "tense": "nervous", "agitated": "panic",
+                    "distressed": "panic", "subdued": "helpless"}
+
+
+def voice_emotion_for(conn, call_uuid):
+    """Fold the call's per-utterance prosody tones into a single voice emotion
+    ({name, confidence}) in the spec's vocabulary, or None if no prosody data."""
+    if cp is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute("SELECT voice_tone, voice_arousal FROM v_call_captions"
+                    " WHERE call_uuid=%s AND voice_tone IS NOT NULL ORDER BY seq",
+                    (call_uuid,))
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    agg = cp.aggregate([(t, float(a or 0)) for t, a in rows])
+    tone = agg.get("voice_emotion")
+    if not tone:
+        return None
+    conf = int(round((agg.get("voice_peak") or agg.get("voice_arousal") or 0) * 100))
+    return {"name": _TONE_TO_EMOTION.get(tone, "calm"), "confidence": max(55, conf),
+            "source": "voice"}
+
+
 def classify_emergency(conn, job):
     """999 mood/intent triage on the assembled transcript (best-effort)."""
     if not (EMERGENCY_TRIAGE and ec is not None):
@@ -422,8 +448,11 @@ def classify_emergency(conn, job):
     key = groq_key(conn)
     if not key:
         return
+    # voice-ground the emotion field when prosody is on (else the LLM text guess)
+    ve = voice_emotion_for(conn, job.row["call_uuid"])
     try:
-        res = ec.classify(transcript, key, caller_id=str(job.row["call_uuid"]))
+        res = ec.classify(transcript, key, caller_id=str(job.row["call_uuid"]),
+                          voice_emotion=ve)
     except Exception as e:  # noqa: BLE001 - triage is best-effort
         log.info("job %s triage error: %s", job.row["job_uuid"], str(e)[:180])
         return
