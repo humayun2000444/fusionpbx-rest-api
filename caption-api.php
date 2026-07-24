@@ -224,6 +224,28 @@ try {
             'transcript' => null));
     }
 
+    if ($action === 'triage') {
+        // 999 emergency mood/intent classification (written by the worker on call end).
+        $st = db()->prepare(
+            "SELECT priority, requires_human_operator, emotion, moods,"
+            . " recommended_services, result, created, updated"
+            . " FROM v_call_emergency WHERE call_uuid = ? LIMIT 1");
+        $st->execute(array($call_uuid));
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
+            $rho = $row['requires_human_operator'];
+            respond(array('ok' => true, 'ready' => true,
+                'priority' => $row['priority'],
+                'requires_human_operator' => ($rho === 't' || $rho === true || $rho === '1'),
+                'emotion' => json_decode($row['emotion'], true),
+                'moods' => json_decode($row['moods'], true),
+                'recommended_services' => json_decode($row['recommended_services'], true),
+                'result' => json_decode($row['result'], true),
+                'created' => $row['created'], 'updated' => $row['updated']));
+        }
+        respond(array('ok' => true, 'ready' => false));
+    }
+
     if ($action === 'stop') {
         $st = db()->prepare("SELECT job_uuid, record_path FROM v_caption_jobs WHERE call_uuid = ? AND status = 'active' LIMIT 1");
         $st->execute(array($call_uuid));

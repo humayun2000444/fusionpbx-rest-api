@@ -40,6 +40,22 @@ CREATE TABLE IF NOT EXISTS v_call_summaries (
     updated       timestamptz DEFAULT now()
 );
 
+-- 999 emergency triage (mood/intent classification), one row per call.
+CREATE TABLE IF NOT EXISTS v_call_emergency (
+    emergency_uuid          uuid PRIMARY KEY,
+    call_uuid               uuid NOT NULL UNIQUE,
+    job_uuid                uuid,
+    priority                text,        -- P1..P4
+    requires_human_operator boolean,
+    emotion                 jsonb,       -- {name, confidence}
+    moods                   jsonb,       -- [{name, confidence, source}]
+    recommended_services    jsonb,       -- ["Fire Service", ...]
+    result                  jsonb,       -- full classifier output
+    created                 timestamptz DEFAULT now(),
+    updated                 timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_call_emergency_priority ON v_call_emergency (priority);
+
 -- Voice-emotion (prosody) columns, added idempotently so upgrades are safe.
 -- Per-utterance read straight from the audio (loudness/pitch/pace):
 ALTER TABLE v_call_captions  ADD COLUMN IF NOT EXISTS voice_tone     text;   -- calm|tense|agitated|distressed|subdued

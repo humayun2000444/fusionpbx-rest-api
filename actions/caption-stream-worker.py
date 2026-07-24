@@ -41,6 +41,11 @@ try:
 except Exception:  # noqa: BLE001 - voice emotion is optional, never fatal
     cp = None
 
+try:
+    import emergency_classify as ec   # 999 mood/intent classifier (optional)
+except Exception:  # noqa: BLE001
+    ec = None
+
 # ---- config -----------------------------------------------------------------
 # Per-server settings live in /etc/fusionpbx/caption.conf (plain KEY=value
 # lines — see caption.conf.example / DEPLOY-CAPTIONS.md). Values below are the
@@ -80,6 +85,10 @@ VAD_SILENCE_SECS = float(_CFG.get("VAD_SILENCE_SECS", "0.5"))  # commit after th
 VOICE_EMOTION = _CFG.get("VOICE_EMOTION", "true").lower() != "false"
 if VOICE_EMOTION and cp is None:
     VOICE_EMOTION = False   # module failed to import — degrade silently
+# 999 emergency mood/intent triage on call end (off by default; a PBX isn't 999).
+EMERGENCY_TRIAGE = _CFG.get("EMERGENCY_TRIAGE", "false").lower() == "true"
+if EMERGENCY_TRIAGE and ec is None:
+    EMERGENCY_TRIAGE = False
 
 SUMMARY_MODEL = _CFG.get("SUMMARY_MODEL", "llama-3.3-70b-versatile")
 SUMMARY_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -399,6 +408,47 @@ def summarize(conn, job):
              "saved" if summary else "saved (transcript only, no LLM)")
 
 
+def classify_emergency(conn, job):
+    """999 mood/intent triage on the assembled transcript (best-effort)."""
+    if not (EMERGENCY_TRIAGE and ec is not None):
+        return
+    with conn.cursor() as cur:
+        cur.execute("SELECT speaker, caption_text FROM v_call_captions"
+                    " WHERE call_uuid=%s ORDER BY seq", (job.row["call_uuid"],))
+        rows = cur.fetchall()
+    transcript = "\n".join(
+        "%s: %s" % ("Speaker A" if (s or 0) == 0 else "Speaker B", t)
+        for s, t in rows)
+    key = groq_key(conn)
+    if not key:
+        return
+    try:
+        res = ec.classify(transcript, key, caller_id=str(job.row["call_uuid"]))
+    except Exception as e:  # noqa: BLE001 - triage is best-effort
+        log.info("job %s triage error: %s", job.row["job_uuid"], str(e)[:180])
+        return
+    moods = res.get("current_moods") or []
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO v_call_emergency (emergency_uuid, call_uuid, job_uuid,"
+            " priority, requires_human_operator, emotion, moods,"
+            " recommended_services, result) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            " ON CONFLICT (call_uuid) DO UPDATE SET priority=EXCLUDED.priority,"
+            " requires_human_operator=EXCLUDED.requires_human_operator,"
+            " emotion=EXCLUDED.emotion, moods=EXCLUDED.moods,"
+            " recommended_services=EXCLUDED.recommended_services,"
+            " result=EXCLUDED.result, updated=now()",
+            (uuid4(), job.row["call_uuid"], job.row["job_uuid"],
+             res.get("priority"), bool(res.get("requires_human_operator")),
+             json.dumps(res.get("emotion") or {}, ensure_ascii=False),
+             json.dumps(moods, ensure_ascii=False),
+             json.dumps(res.get("recommended_services") or [], ensure_ascii=False),
+             json.dumps(res, ensure_ascii=False)))
+    log.info("job %s triage: %s %s human=%s", job.row["job_uuid"],
+             res.get("priority"), [m.get("name") for m in moods],
+             res.get("requires_human_operator"))
+
+
 def finish(conn, job, status):
     esl_api("uuid_record %s stop %s" % (job.row["call_uuid"], job.row["record_path"]))
     with conn.cursor() as cur:
@@ -581,6 +631,10 @@ async def handle_job(conn, job):
         summarize(conn, job)
     except Exception as e:  # noqa: BLE001
         log.info("job %s summarize failed: %s", job.row["job_uuid"], str(e)[:180])
+    try:
+        classify_emergency(conn, job)
+    except Exception as e:  # noqa: BLE001
+        log.info("job %s triage failed: %s", job.row["job_uuid"], str(e)[:180])
 
 
 async def main():
