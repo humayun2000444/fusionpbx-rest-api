@@ -45,6 +45,17 @@ FRAME_MS = 32.0
 HOP_MS = 16.0
 BASELINE_KEEP = 10        # rolling window of past utterances per speaker
 
+# Neutral points calibrated on REAL 8 kHz telephony (not synthetic tones): calm
+# call speech naturally sits at pitch_var ~0.35 and loudness-dynamics ~1.5, so
+# those are the "zero arousal" references. Arousal is driven mainly by the
+# reliable baseline-relative cues (loudness / pitch / rate vs the speaker's own
+# norm); pitch_var and dyn are noisy at 8 kHz and only nudge.
+PVAR_NEUTRAL = 0.35
+DYN_NEUTRAL = 1.5
+NO_BASE_AROUSAL = 0.2     # before a baseline exists we can't judge — stay calm
+SHORT_UTT_SECS = 0.45     # below this, ratios are unreliable (one-word bursts)
+SHORT_CAP = 0.5           # a short burst can flag "tense" at most, never alarm
+
 # canonical tone enum (stored in v_call_captions.voice_tone; UI localizes/colors)
 TONE_CALM = "calm"
 TONE_TENSE = "tense"
@@ -274,6 +285,8 @@ class SpeakerBaseline:
         return len(self._energy) >= 2
 
     def update(self, feats, speech_rate=0.0):
+        if (feats.get("voiced_secs", 0.0) or 0.0) < SHORT_UTT_SECS:
+            return  # too short to be a trustworthy baseline sample
         if feats.get("energy_mean", 0) > 0:
             self._energy.append(feats["energy_mean"])
             self._energy = self._energy[-BASELINE_KEEP:]
@@ -315,34 +328,44 @@ class SpeakerBaseline:
         f_ratio = (f0 / bf) if bf > 0 else 1.0
         r_ratio = (speech_rate / br) if br > 0 else 1.0
 
+        short = vsecs < SHORT_UTT_SECS
         detail = {"e_ratio": round(e_ratio, 2), "f_ratio": round(f_ratio, 2),
                   "r_ratio": round(r_ratio, 2), "pitch_var": round(pvar, 3),
                   "dyn": round(dyn, 2), "rate": round(speech_rate, 1),
-                  "have_base": have}
+                  "vsecs": round(vsecs, 2), "have_base": have, "short": short}
 
         if e <= 0 or feats.get("voiced_ratio", 0) < 0.05:
             return TONE_CALM, 0.0, detail  # essentially silence
 
-        if have:
-            # elevation above the speaker's own calm; each term ~0 at baseline
-            z = (3.2 * (e_ratio - 1.0)          # louder than usual
-                 + 3.0 * (f_ratio - 1.0)        # higher pitched than usual
-                 + 1.6 * (r_ratio - 1.0)        # faster than usual
-                 + 2.4 * (pvar - 0.06)          # pitch instability / tremor
-                 + 0.8 * (dyn - 0.9))           # punchy loudness swings
-            arousal = _sig(z - 0.4)
-        else:
-            # no baseline yet: judge only intrinsic agitation cues, damped
-            z = 2.6 * (pvar - 0.08) + 0.7 * (dyn - 1.0)
-            arousal = min(0.55, _sig(z - 0.6))  # cannot claim high arousal blind
+        if not have:
+            # No baseline yet — we can't tell this speaker's "loud" from their
+            # normal, and the intrinsic cues (pitch_var/dyn) are too noisy on
+            # 8 kHz telephony to trust blind. Stay calm; the baseline forms in
+            # 2-3 utterances and the call-level trend still catches escalation.
+            return TONE_CALM, NO_BASE_AROUSAL, detail
 
-        # map arousal (+ shape) to a tone label
-        if arousal >= 0.66:
-            tone = TONE_DISTRESSED if pvar >= 0.14 else TONE_AGITATED
-        elif arousal >= 0.42:
+        # Elevation above the speaker's OWN calm norm. Loudness / pitch / rate
+        # ratios are the reliable signals; pitch_var & dyn only nudge (realistic
+        # neutral points, low weight) because they are noisy at 8 kHz.
+        z = (3.0 * (e_ratio - 1.0)                  # louder than own norm
+             + 3.6 * (f_ratio - 1.0)                # higher pitched than own norm
+             + 1.2 * max(0.0, r_ratio - 1.0)        # faster (only faster raises)
+             + 0.5 * (pvar - PVAR_NEUTRAL)          # weak: instability above norm
+             + 0.4 * (dyn - DYN_NEUTRAL))           # weak: punchy loudness swings
+        arousal = _sig(0.9 * z - 1.6)
+        if short:
+            arousal = min(arousal, SHORT_CAP)       # one-word bursts can't alarm
+
+        # A real escalation must show actual loudness or pitch lift — not just a
+        # noisy pitch_var — before we label agitated/distressed.
+        hot = (e_ratio >= 1.5) or (f_ratio >= 1.15)
+        if arousal >= 0.66 and hot:
+            tone = (TONE_DISTRESSED if (f_ratio >= 1.2 or e_ratio >= 1.9)
+                    else TONE_AGITATED)
+        elif arousal >= 0.45:
             tone = TONE_TENSE
-        elif arousal <= 0.22 and e_ratio < 0.85 and r_ratio < 0.92:
-            tone = TONE_SUBDUED  # quieter + slower than own norm = flat/withdrawn
+        elif arousal <= 0.24 and e_ratio < 0.9 and r_ratio < 0.95:
+            tone = TONE_SUBDUED   # quieter + slower than own norm = flat/withdrawn
         else:
             tone = TONE_CALM
         return tone, round(arousal, 3), detail
