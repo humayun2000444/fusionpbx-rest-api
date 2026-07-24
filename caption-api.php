@@ -95,7 +95,8 @@ try {
         $st = db()->prepare(
             "SELECT j.call_uuid, j.status, j.created,
                     (SELECT count(*) FROM v_call_captions c WHERE c.call_uuid = j.call_uuid) AS captions,
-                    s.summary, s.summary_model, s.sentiment, s.caller_mood, s.situation, s.updated AS summary_updated
+                    s.summary, s.summary_model, s.sentiment, s.caller_mood, s.situation,
+                    s.voice_emotion, s.voice_arousal, s.voice_trend, s.updated AS summary_updated
                FROM v_caption_jobs j
                LEFT JOIN v_call_summaries s ON s.call_uuid = j.call_uuid
               ORDER BY j.created DESC LIMIT ?");
@@ -111,6 +112,9 @@ try {
                 'sentiment' => $r['sentiment'],
                 'caller_mood' => $r['caller_mood'],
                 'situation' => $r['situation'],
+                'voice_emotion' => $r['voice_emotion'],
+                'voice_arousal' => $r['voice_arousal'] === null ? null : (float)$r['voice_arousal'],
+                'voice_trend' => $r['voice_trend'],
                 'model'     => $r['summary_model'],
             );
         }
@@ -156,7 +160,7 @@ try {
         $st->execute(array($call_uuid));
         $jrow = $st->fetch(PDO::FETCH_ASSOC);
         $st = db()->prepare(
-            "SELECT seq, speaker, caption_text, caption_language, created
+            "SELECT seq, speaker, caption_text, caption_language, voice_tone, voice_arousal, created
                FROM v_call_captions WHERE call_uuid = ? AND seq > ?
               ORDER BY seq ASC LIMIT 50");
         $st->execute(array($call_uuid, $after));
@@ -167,6 +171,8 @@ try {
                 'speaker'  => $r['speaker'] === null ? null : (int)$r['speaker'],
                 'text'     => $r['caption_text'],
                 'language' => $r['caption_language'],
+                'voice_tone' => $r['voice_tone'],
+                'voice_arousal' => $r['voice_arousal'] === null ? null : (float)$r['voice_arousal'],
                 'created'  => $r['created'],
             );
         }
@@ -177,7 +183,8 @@ try {
         // Post-call summary + transcript (written by caption-stream-worker.py
         // after the call ends). Join against call logs/CDR by call_uuid.
         $st = db()->prepare(
-            "SELECT summary, transcript, summary_model, sentiment, caller_mood, situation, created, updated
+            "SELECT summary, transcript, summary_model, sentiment, caller_mood, situation,
+                    voice_emotion, voice_arousal, voice_trend, created, updated
                FROM v_call_summaries WHERE call_uuid = ? LIMIT 1");
         $st->execute(array($call_uuid));
         $row = $st->fetch(PDO::FETCH_ASSOC);
@@ -185,7 +192,8 @@ try {
             // Captions may have run on the other leg of this call: match via the
             // CDR's bridge/originating leg uuids in both directions.
             $st = db()->prepare(
-                "SELECT s.summary, s.transcript, s.summary_model, s.sentiment, s.caller_mood, s.situation, s.created, s.updated
+                "SELECT s.summary, s.transcript, s.summary_model, s.sentiment, s.caller_mood, s.situation,
+                        s.voice_emotion, s.voice_arousal, s.voice_trend, s.created, s.updated
                    FROM v_call_summaries s
                   WHERE s.call_uuid::text IN (
                         SELECT bridge_uuid::text FROM v_xml_cdr
@@ -206,6 +214,9 @@ try {
                 'summary' => $row['summary'], 'transcript' => $row['transcript'],
                 'sentiment' => $row['sentiment'], 'caller_mood' => $row['caller_mood'],
                 'situation' => $row['situation'],
+                'voice_emotion' => $row['voice_emotion'],
+                'voice_arousal' => $row['voice_arousal'] === null ? null : (float)$row['voice_arousal'],
+                'voice_trend' => $row['voice_trend'],
                 'model' => $row['summary_model'], 'created' => $row['created'],
                 'updated' => $row['updated']));
         }

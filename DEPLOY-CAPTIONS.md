@@ -28,6 +28,8 @@ ElevenLabs Scribe v2 Realtime  ──committed captions──▶ v_call_captions
 
 1. **Code** — this repo at `/var/www/fusionpbx/app/rest_api` (branch master).
    The needed files: `caption-api.php`, `actions/caption-stream-worker.py`,
+   `actions/caption_prosody.py` (voice-emotion; pure stdlib, ship it beside the
+   worker — the worker does `import caption_prosody`),
    `actions/caption-stream-worker.service`, `actions/caption-schema.sql`.
 
 2. **Schema**
@@ -73,6 +75,9 @@ Then: place a call → open captions in the dashboard (words ~1s behind speech)
 
 - **Cost**: realtime streams BOTH audio channels → ~2× call duration billed
   per captioned call on ElevenLabs, plus a small Groq fee per summary.
+- **Voice emotion** (`caption_prosody.py`) needs no extra deps, no GPU and no
+  cloud — pure Python on audio already captured. On by default; set
+  `VOICE_EMOTION = "false"` in caption.conf to turn it off.
 - The old batch worker (`actions/caption-worker.php`, `caption-worker.service`)
   is a fallback; do NOT run both services at once (same jobs table).
 - Summary lookup matches across call legs via v_xml_cdr bridge/originating

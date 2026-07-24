@@ -39,3 +39,12 @@ CREATE TABLE IF NOT EXISTS v_call_summaries (
     created       timestamptz DEFAULT now(),
     updated       timestamptz DEFAULT now()
 );
+
+-- Voice-emotion (prosody) columns, added idempotently so upgrades are safe.
+-- Per-utterance read straight from the audio (loudness/pitch/pace):
+ALTER TABLE v_call_captions  ADD COLUMN IF NOT EXISTS voice_tone     text;   -- calm|tense|agitated|distressed|subdued
+ALTER TABLE v_call_captions  ADD COLUMN IF NOT EXISTS voice_arousal  real;   -- 0.0 (calm) .. 1.0 (agitated)
+-- Call-level fold of the above (dominant tone / mean arousal / rising|falling|steady):
+ALTER TABLE v_call_summaries ADD COLUMN IF NOT EXISTS voice_emotion  text;
+ALTER TABLE v_call_summaries ADD COLUMN IF NOT EXISTS voice_arousal  real;
+ALTER TABLE v_call_summaries ADD COLUMN IF NOT EXISTS voice_trend    text;

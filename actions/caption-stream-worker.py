@@ -36,6 +36,11 @@ import psycopg2
 import psycopg2.extras
 import websockets
 
+try:
+    import caption_prosody as cp   # local module (same actions/ dir), stdlib-only
+except Exception:  # noqa: BLE001 - voice emotion is optional, never fatal
+    cp = None
+
 # ---- config -----------------------------------------------------------------
 # Per-server settings live in /etc/fusionpbx/caption.conf (plain KEY=value
 # lines — see caption.conf.example / DEPLOY-CAPTIONS.md). Values below are the
@@ -69,6 +74,12 @@ SECONDARY_LANGS = _CFG.get("SECONDARY_LANGS", "eng")  # code-switch languages, c
 FILTER_BG = _CFG.get("FILTER_BG", "true").lower() != "false"  # server-side noise filter
 KEYTERMS = _CFG.get("KEYTERMS", "")   # comma-sep bias terms (names/products); '' = off
 VAD_SILENCE_SECS = float(_CFG.get("VAD_SILENCE_SECS", "0.5"))  # commit after this much silence
+# Voice emotion: read mood straight from the audio (loudness/pitch/pace) per
+# utterance, independent of the words. Language-agnostic; pure-Python DSP run in
+# a thread so it never blocks the audio loop. Set VOICE_EMOTION=false to disable.
+VOICE_EMOTION = _CFG.get("VOICE_EMOTION", "true").lower() != "false"
+if VOICE_EMOTION and cp is None:
+    VOICE_EMOTION = False   # module failed to import — degrade silently
 
 SUMMARY_MODEL = _CFG.get("SUMMARY_MODEL", "llama-3.3-70b-versatile")
 SUMMARY_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -184,22 +195,77 @@ class JobState:
         self.done = False
 
 
-async def insert_caption(conn, job, speaker, text, lang):
+class ProsodyState:
+    """Per-channel raw-PCM buffer + rolling voice baseline for prosody.
+
+    stream_channel appends the same mono PCM it streams to the STT; on each
+    committed_transcript the receiver drains the buffer and scores that
+    utterance's arousal/tone relative to this speaker's own baseline.
+    """
+
+    def __init__(self, rate, speaker=None):
+        self.rate = rate
+        self.speaker = speaker
+        self.baseline = cp.SpeakerBaseline()
+        self.buf = bytearray()
+        self._cap = int(rate) * 2 * 45  # ~45s hard cap if a commit never comes
+
+    def add(self, mono):
+        self.buf += mono
+        if len(self.buf) > self._cap:
+            del self.buf[:len(self.buf) - self._cap]
+
+    def take(self):
+        b = bytes(self.buf)
+        self.buf = bytearray()
+        return b
+
+
+async def analyze_voice(job, pstate, text):
+    """Score one utterance's voice emotion off the event loop (thread executor).
+
+    Returns (tone, arousal) or (None, None). Best-effort — never raises into the
+    caption path, so a prosody hiccup can't cost us a caption.
+    """
+    pcm = pstate.take()
+    if not pcm:
+        return None, None
+    try:
+        loop = asyncio.get_event_loop()
+        feats = await loop.run_in_executor(None, cp.analyze_utterance, pcm, pstate.rate)
+        tone, arousal, detail = pstate.baseline.classify(feats, text=text)
+        pstate.baseline.update(feats, speech_rate=detail.get("rate", 0.0))
+        log.info("job %s voice spk %s -> %s a=%.2f %s",
+                 job.row["job_uuid"], pstate.speaker, tone, arousal, detail)
+        return tone, float(arousal)
+    except Exception as e:  # noqa: BLE001 - prosody is best-effort, never fatal
+        log.info("job %s prosody error: %s", job.row["job_uuid"], str(e)[:150])
+        return None, None
+
+
+async def insert_caption(conn, job, speaker, text, lang, voice_tone=None,
+                         voice_arousal=None):
     text = text.strip()
     if not text:
-        return
+        return None
     async with job.lock:
         job.seq += 1
         seq = job.seq
+    cu = uuid4()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO v_call_captions (caption_uuid, call_uuid, seq, speaker,"
-            " caption_text, caption_language) VALUES (%s,%s,%s,%s,%s,%s)",
-            (uuid4(), job.row["call_uuid"], seq, speaker, text, lang))
+            " caption_text, caption_language, voice_tone, voice_arousal)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (cu, job.row["call_uuid"], seq, speaker, text, lang,
+             voice_tone, voice_arousal))
         cur.execute("UPDATE v_caption_jobs SET seq=%s, updated=now() WHERE job_uuid=%s",
                     (seq, job.row["job_uuid"]))
-    log.info("job %s seq %s spk %s [%s] %s",
-             job.row["job_uuid"], seq, speaker, lang, text[:70])
+    log.info("job %s seq %s spk %s [%s]%s %s",
+             job.row["job_uuid"], seq, speaker, lang,
+             (" <%s %.2f>" % (voice_tone, voice_arousal)) if voice_tone else "",
+             text[:70])
+    return cu
 
 
 def groq_key(conn):
@@ -220,13 +286,48 @@ def groq_key(conn):
 def summarize(conn, job):
     """Assemble the transcript and store a Bangla summary (best-effort)."""
     with conn.cursor() as cur:
-        cur.execute("SELECT speaker, caption_text FROM v_call_captions"
-                    " WHERE call_uuid=%s ORDER BY seq", (job.row["call_uuid"],))
+        cur.execute("SELECT speaker, caption_text, voice_tone, voice_arousal"
+                    " FROM v_call_captions WHERE call_uuid=%s ORDER BY seq",
+                    (job.row["call_uuid"],))
         rows = cur.fetchall()
     if not rows:
         return
     transcript = "\n".join(
-        "%s: %s" % ("Speaker A" if (s or 0) == 0 else "Speaker B", t) for s, t in rows)
+        "%s: %s" % ("Speaker A" if (s or 0) == 0 else "Speaker B", t)
+        for s, t, _vt, _va in rows)
+
+    # --- fold the per-utterance voice tones into a call-level read ----------
+    voice_emotion = voice_arousal = voice_trend = None
+    voice_hint = ""
+    if VOICE_EMOTION and cp is not None:
+        by_spk = {}
+        for s, _t, vt, va in rows:
+            if not vt:
+                continue
+            by_spk.setdefault(0 if (s or 0) == 0 else 1, []).append(
+                (vt, float(va or 0.0)))
+        agg = {sp: cp.aggregate(seq) for sp, seq in by_spk.items() if seq}
+        if agg:
+            names = {0: "Speaker A", 1: "Speaker B"}
+            trend_bn = {"rising": "কথার সাথে সাথে ক্রমশ উত্তেজিত",
+                        "falling": "কথার সাথে সাথে ক্রমশ শান্ত", "steady": "স্থির"}
+            parts = []
+            for sp in sorted(agg):
+                a = agg[sp]
+                parts.append("%s এর কণ্ঠস্বর: %s (গড় উত্তেজনা %d%%, %s)" % (
+                    names[sp], a.get("voice_emotion_bn") or "—",
+                    int(round((a.get("voice_arousal") or 0) * 100)),
+                    trend_bn.get(a.get("voice_trend"), "স্থির")))
+            voice_hint = (
+                "\n\nকণ্ঠস্বর বিশ্লেষণ (সরাসরি অডিও থেকে মাপা — শব্দ থেকে নয়, তাই"
+                " আবেগের প্রকৃত সংকেত): " + "; ".join(parts) +
+                "। এই কণ্ঠস্বরের তথ্য বর্ণনায় স্বাভাবিকভাবে মিশিয়ে দিন।")
+            # call-level: the speaker who showed the most vocal arousal
+            best = max(agg.values(), key=lambda a: a.get("voice_peak") or 0)
+            voice_emotion = best.get("voice_emotion")
+            voice_arousal = best.get("voice_arousal")
+            voice_trend = best.get("voice_trend")
+
     key = groq_key(conn)
     summary, model_used = None, None
     sentiment, caller_mood, situation = None, None, None
@@ -236,7 +337,9 @@ def summarize(conn, job):
             " পড়ে একজন মানুষ যেভাবে সহকর্মীকে গল্পের মতো করে বলে, সেভাবে স্বাভাবিক"
             " বাংলায় বর্ণনা করুন — কে ফোন করেছিল, কী চেয়েছিল, কথোপকথনের সময় তাদের"
             " মেজাজ/আবেগ কেমন ছিল (রাগ, বিরক্তি, খুশি, উদ্বেগ, স্বস্তি ইত্যাদি),"
-            " এবং শেষে কী হলো। রোবটের মতো তালিকা নয় — প্রাণবন্ত, সহজ ভাষা।\n\n"
+            " এবং শেষে কী হলো। রোবটের মতো তালিকা নয় — প্রাণবন্ত, সহজ ভাষা।"
+            " কণ্ঠস্বর বিশ্লেষণ দেওয়া থাকলে সেটিকে গুরুত্ব দিন — এটি প্রকৃত আবেগ"
+            " (শান্ত/উত্তেজিত/টানটান) নির্দেশ করে যা শুধু শব্দে ধরা পড়ে না।\n\n"
             "শুধু নিচের JSON ফরম্যাটে উত্তর দিন:\n"
             "{\"summary\": \"৪-৬ বাক্যের মানবিক বর্ণনা (আবেগসহ)\",\n"
             " \"sentiment\": \"positive|neutral|negative\",\n"
@@ -244,7 +347,8 @@ def summarize(conn, job):
             " রাগান্বিত, উদ্বিগ্ন, হতাশ)\",\n"
             " \"situation\": \"কলারের পরিস্থিতি এক লাইনে\",\n"
             " \"action_items\": [\"করণীয় (থাকলে)\"]}\n\n"
-            "ট্রান্সক্রিপ্ট (বাংলা-ইংরেজি মিশ্রিত হতে পারে):\n" + transcript[:12000])
+            "ট্রান্সক্রিপ্ট (বাংলা-ইংরেজি মিশ্রিত হতে পারে):\n" + transcript[:12000] +
+            voice_hint)
         body = json.dumps({
             "model": SUMMARY_MODEL,
             "messages": [{"role": "user", "content": prompt}],
@@ -277,14 +381,20 @@ def summarize(conn, job):
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO v_call_summaries (summary_uuid, call_uuid, job_uuid,"
-            " transcript, summary, summary_model, sentiment, caller_mood, situation)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            " transcript, summary, summary_model, sentiment, caller_mood, situation,"
+            " voice_emotion, voice_arousal, voice_trend)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
             " ON CONFLICT (call_uuid) DO UPDATE SET transcript=EXCLUDED.transcript,"
             " summary=EXCLUDED.summary, summary_model=EXCLUDED.summary_model,"
             " sentiment=EXCLUDED.sentiment, caller_mood=EXCLUDED.caller_mood,"
-            " situation=EXCLUDED.situation, updated=now()",
+            " situation=EXCLUDED.situation, voice_emotion=EXCLUDED.voice_emotion,"
+            " voice_arousal=EXCLUDED.voice_arousal, voice_trend=EXCLUDED.voice_trend,"
+            " updated=now()",
             (uuid4(), job.row["call_uuid"], job.row["job_uuid"],
-             transcript, summary, model_used, sentiment, caller_mood, situation))
+             transcript, summary, model_used, sentiment, caller_mood, situation,
+             voice_emotion,
+             float(voice_arousal) if voice_arousal is not None else None,
+             voice_trend))
     log.info("job %s summary %s", job.row["job_uuid"],
              "saved" if summary else "saved (transcript only, no LLM)")
 
@@ -320,7 +430,7 @@ async def ws_connect(rate):
                                         max_size=None)
 
 
-async def stream_channel(conn, job, info, ch, stop_evt):
+async def stream_channel(conn, job, info, ch, stop_evt, pstate=None):
     """Tail one channel of the growing WAV into a realtime STT session."""
     path = job.row["record_path"]
     rate = info["rate"]
@@ -350,10 +460,12 @@ async def stream_channel(conn, job, info, ch, stop_evt):
                 buf = fh.read(take)
             offset += len(buf)
             mono = deinterleave(buf, channels, ch)
+            if pstate is not None:
+                pstate.add(mono)
 
             if ws is None:
                 ws = await ws_connect(rate)
-                asyncio.ensure_future(receiver(conn, job, ws, speaker, stop_evt))
+                asyncio.ensure_future(receiver(conn, job, ws, speaker, stop_evt, pstate))
             try:
                 await ws.send(json.dumps({
                     "message_type": "input_audio_chunk",
@@ -363,7 +475,7 @@ async def stream_channel(conn, job, info, ch, stop_evt):
                 log.info("job %s spk %s ws closed, reconnecting",
                          job.row["job_uuid"], speaker)
                 ws = await ws_connect(rate)
-                asyncio.ensure_future(receiver(conn, job, ws, speaker, stop_evt))
+                asyncio.ensure_future(receiver(conn, job, ws, speaker, stop_evt, pstate))
                 await ws.send(json.dumps({
                     "message_type": "input_audio_chunk",
                     "audio_base_64": base64.b64encode(mono).decode(),
@@ -386,14 +498,21 @@ async def stream_channel(conn, job, info, ch, stop_evt):
                 pass
 
 
-async def receiver(conn, job, ws, speaker, stop_evt):
+async def receiver(conn, job, ws, speaker, stop_evt, pstate=None):
     lang_hint = LANG
     try:
         async for raw in ws:
             m = json.loads(raw)
             mt = m.get("message_type", "")
             if mt == "committed_transcript":
-                await insert_caption(conn, job, speaker, m.get("text", ""), lang_hint)
+                text = m.get("text", "")
+                tone = arousal = None
+                if pstate is not None and text.strip():
+                    # score the voice BEFORE inserting so the tone is present the
+                    # moment the caption row appears (the live poll reads by seq)
+                    tone, arousal = await analyze_voice(job, pstate, text)
+                await insert_caption(conn, job, speaker, text, lang_hint,
+                                     tone, arousal)
             elif mt == "session_started":
                 lang_hint = (m.get("config") or {}).get("language_code", LANG)
             elif mt.endswith("error") or mt in (
@@ -446,8 +565,12 @@ async def handle_job(conn, job):
             await asyncio.sleep(1.0)
         stop_evt.set()
 
-    chans = range(info["channels"]) if info["channels"] == 2 else [0]
-    tasks = [asyncio.ensure_future(stream_channel(conn, job, info, c, stop_evt))
+    chans = list(range(info["channels"])) if info["channels"] == 2 else [0]
+    speaker_of = (lambda c: c) if info["channels"] == 2 else (lambda c: None)
+    pstates = ({c: ProsodyState(info["rate"], speaker_of(c)) for c in chans}
+               if VOICE_EMOTION else {})
+    tasks = [asyncio.ensure_future(
+                 stream_channel(conn, job, info, c, stop_evt, pstates.get(c)))
              for c in chans]
     tasks.append(asyncio.ensure_future(watchdog()))
     await asyncio.gather(*tasks, return_exceptions=True)
