@@ -29,6 +29,13 @@ FILTER_BG = "true"         # server-side background-noise filtering
 KEYTERMS = ""              # comma-sep bias words (company/product/agent names)
 VAD_SILENCE_SECS = "0.5"   # pause that ends an utterance; higher = more context/accuracy, more latency
 
+# Voice emotion (prosody): read the caller's mood straight from the audio —
+# loudness, pitch, pitch instability and pace, per utterance — independent of
+# the words. Language-agnostic, pure-Python (no numpy/GPU), runs off the audio
+# loop in a thread. Produces per-caption tone (calm/tense/agitated/distressed/
+# subdued) + a call-level read fused into the summary. "false" disables it.
+VOICE_EMOTION = "true"
+
 # Optional overrides (defaults are usually right)
 #STT_MODEL = "scribe_v2_realtime"
 #SUMMARY_MODEL = "llama-3.3-70b-versatile"

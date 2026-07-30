@@ -16,6 +16,47 @@
 
 if (!function_exists('oc_get_config')) {
 
+/** Global (CCL-wide) TTS credentials.
+ *
+ *  Any domain that has no value of its own inherits it from v_default_settings
+ *  (category 'order_confirm'), so ONE system key serves every domain — existing
+ *  and future — instead of pasting the key into each domain's config. A
+ *  non-empty per-domain value always wins, so this is fully back-compatible.
+ *
+ *  Applied inside oc_get_config(), so every path benefits: the gateway call,
+ *  the background worker, and the deferred TTS CLI (which synthesises after
+ *  answer and only ever sees the domain config).
+ */
+function oc_apply_global_tts_defaults($database, $config) {
+    $globals = array();
+    $rows = $database->select(
+        "SELECT default_setting_subcategory AS k, default_setting_value AS v"
+        . " FROM v_default_settings"
+        . " WHERE default_setting_category = 'order_confirm'"
+        . " AND default_setting_enabled = true", null, 'all');
+    if (is_array($rows)) {
+        foreach ($rows as $r) {
+            if (isset($r['k'])) $globals[$r['k']] = isset($r['v']) ? $r['v'] : '';
+        }
+    }
+    $keys = array('tts_provider', 'tts_google_key', 'tts_elevenlabs_key',
+                  'tts_elevenlabs_voice_id', 'tts_elevenlabs_model',
+                  'tts_elevenlabs_language', 'tts_azure_key', 'tts_openai_key');
+    // When the caller had no config row at all, everything in $config is a
+    // hardcoded fallback — let the system-wide values win outright.
+    $is_defaults = !empty($config['__defaults']);
+    unset($config['__defaults']);
+    foreach ($keys as $k) {
+        $blank = (!isset($config[$k]) || trim((string)$config[$k]) === '');
+        if (isset($globals[$k]) && trim((string)$globals[$k]) !== ''
+            && ($is_defaults || $blank)) {
+            $config[$k] = $globals[$k];
+        }
+    }
+    return $config;
+}
+
+
 /** Load the domain's config row; returns an associative array (defaults if none). */
 function oc_get_config($database, $domain_uuid) {
     $row = $database->select(
@@ -52,8 +93,12 @@ function oc_get_config($database, $domain_uuid) {
             'reference_label' => 'Order ID', 'recipient_label' => 'Customer', 'entity_label' => 'Order',
             'dtmf_options' => '[{"digit":"1","label":"Confirm","action":"callback","value":"1"},{"digit":"2","label":"Cancel","action":"callback","value":"2"},{"digit":"0","label":"Support","action":"transfer","value":""}]',
         );
+        // These are hardcoded code fallbacks, not a per-domain choice, so the
+        // system-wide Default Settings values take precedence over them below.
+        $row['__defaults'] = true;
     }
-    return $row;
+    // Inherit the CCL-wide key for any tts_* the domain leaves blank.
+    return oc_apply_global_tts_defaults($database, $row);
 }
 
 /** Overlay system-wide TTS credentials that the TelcoREST gateway injected into
