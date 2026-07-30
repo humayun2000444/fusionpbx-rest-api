@@ -21,7 +21,18 @@ function do_action($body) {
     $agent_reject_delay_time = isset($body->agentRejectDelayTime) ? intval($body->agentRejectDelayTime) : (isset($body->agent_reject_delay_time) ? intval($body->agent_reject_delay_time) : 90);
     $agent_busy_delay_time = isset($body->agentBusyDelayTime) ? intval($body->agentBusyDelayTime) : (isset($body->agent_busy_delay_time) ? intval($body->agent_busy_delay_time) : 90);
     $agent_no_answer_delay_time = isset($body->agentNoAnswerDelayTime) ? $body->agentNoAnswerDelayTime : (isset($body->agent_no_answer_delay_time) ? $body->agent_no_answer_delay_time : '30');
-    $agent_record = isset($body->agentRecord) ? $body->agentRecord : (isset($body->agent_record) ? $body->agent_record : '');
+    $agent_record = isset($body->agentRecord) ? $body->agentRecord : (isset($body->agent_record) ? $body->agent_record : null);
+    // AGENT_RECORD_BOOL_FIX: agent_record is a BOOLEAN column — '' is invalid input for boolean in
+    // PostgreSQL (SQLSTATE 22P02) and silently aborted the INSERT. Default to null and
+    // normalise any supplied value into a real boolean literal.
+    if ($agent_record === '' || $agent_record === null) {
+        $agent_record = null;
+    } elseif (is_bool($agent_record)) {
+        $agent_record = $agent_record ? 'true' : 'false';
+    } else {
+        $agent_record = in_array(strtolower((string) $agent_record),
+            array('true', 't', '1', 'yes', 'on'), true) ? 'true' : 'false';
+    }
     $user_uuid = isset($body->userUuid) ? $body->userUuid : (isset($body->user_uuid) ? $body->user_uuid : null);
 
     // Validate agent type
@@ -91,6 +102,20 @@ function do_action($body) {
     );
 
     $database->execute($sql_insert, $parameters);
+
+    // AGENT_RECORD_BOOL_FIX: database->execute() swallows PDO errors and returns false, so confirm the row
+    // actually persisted rather than reporting success for a failed INSERT.
+    $verify = $database->select(
+        "SELECT call_center_agent_uuid FROM v_call_center_agents WHERE call_center_agent_uuid = :agent_uuid",
+        array("agent_uuid" => $agent_uuid), 'column');
+    if (!$verify) {
+        $db_message = is_array($database->message) ? $database->message : array();
+        return array(
+            "error" => "failed to save agent to the database",
+            "details" => isset($db_message['message']) ? $db_message['message'] : null,
+            "code" => 500,
+        );
+    }
 
     // Clear the callcenter config cache so FreeSWITCH regenerates it
     require_once "resources/switch.php";

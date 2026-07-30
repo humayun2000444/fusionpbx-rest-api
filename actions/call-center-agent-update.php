@@ -67,6 +67,19 @@ function do_action($body) {
         }
     }
 
+    // AGENT_RECORD_BOOL_FIX: never send '' to the BOOLEAN agent_record column (PostgreSQL 22P02).
+    if (array_key_exists('agent_record', $parameters)) {
+        $v = $parameters['agent_record'];
+        if ($v === '' || $v === null) {
+            $parameters['agent_record'] = null;
+        } elseif (is_bool($v)) {
+            $parameters['agent_record'] = $v ? 'true' : 'false';
+        } else {
+            $parameters['agent_record'] = in_array(strtolower((string) $v),
+                array('true', 't', '1', 'yes', 'on'), true) ? 'true' : 'false';
+        }
+    }
+
     if (empty($update_fields)) {
         return array("error" => "No fields to update");
     }
