@@ -1,4 +1,58 @@
 <?php
+
+/**
+ * Normalize an IVR option param to exactly what the FusionPBX GUI stores.
+ *
+ * The GUI (app/ivr_menus/ivr_menu_edit.php) always persists a transfer as
+ * "transfer <destination> XML <context>". A bare "transfer 100" carries no
+ * dialplan or context, so FreeSWITCH cannot resolve it and the IVR option
+ * silently fails -- which is why an option set from the GUI worked while the
+ * same option set over REST did not.
+ *
+ * Accepts every shape a client may send and returns the GUI-equivalent:
+ *   "100"                      -> "transfer 100 XML <context>"
+ *   "transfer 100"             -> "transfer 100 XML <context>"
+ *   "transfer 100 XML"         -> "transfer 100 XML <context>"
+ *   "transfer 100 XML ctx"     -> unchanged (already complete)
+ * Non-transfer params (hangup, playback, lua, set, sleep, answer, ...) are
+ * returned untouched.
+ */
+if (!function_exists('ivr_normalize_option_param')) {
+function ivr_normalize_option_param($param, $context) {
+    $param = trim((string) $param);
+    if ($param === '' || $context === '') {
+        return $param;
+    }
+
+    // A bare destination ("100") is shorthand for a transfer.
+    if (is_numeric($param)) {
+        return 'transfer ' . $param . ' XML ' . $context;
+    }
+
+    // Only transfers take the dialplan/context suffix.
+    if (stripos($param, 'transfer ') !== 0) {
+        return $param;
+    }
+
+    $rest = trim(substr($param, strlen('transfer ')));
+    if ($rest === '') {
+        return $param;
+    }
+    $parts = preg_split('/\s+/', $rest);
+
+    // "transfer <dest>" -> add the dialplan + context the GUI would add.
+    if (count($parts) === 1) {
+        return 'transfer ' . $parts[0] . ' XML ' . $context;
+    }
+    // "transfer <dest> XML" -> context was dropped; restore it.
+    if (count($parts) === 2 && strcasecmp($parts[1], 'XML') === 0) {
+        return 'transfer ' . $parts[0] . ' XML ' . $context;
+    }
+
+    // Already complete (e.g. "transfer 100 XML ctx").
+    return $param;
+}
+}
 /**
  * IVR Update - Updates IVR menu matching FusionPBX GUI behavior
  * Regenerates dialplan_xml and clears cache so changes take effect immediately
@@ -264,21 +318,19 @@ function do_action($body) {
                 $raw_param = isset($opt->param) ? $opt->param : '';
 
                 if (isset($opt->action) && !empty($opt->action)) {
-                    // Action and param provided separately (from frontend)
                     $ivr_menu_option_action = $opt->action;
-                    if (is_numeric($raw_param)) {
-                        $ivr_menu_option_param = 'transfer ' . $raw_param . ' XML ' . $ivr_menu_context;
-                    } else {
-                        $ivr_menu_option_param = $raw_param;
-                    }
+                    // Store exactly what the GUI would store (adds the
+                    // "XML <context>" a client may have omitted).
+                    $ivr_menu_option_param = ivr_normalize_option_param($raw_param, $ivr_menu_context);
                 } elseif (is_numeric($raw_param)) {
                     $ivr_menu_option_action = 'menu-exec-app';
-                    $ivr_menu_option_param = 'transfer ' . $raw_param . ' XML ' . $ivr_menu_context;
+                    $ivr_menu_option_param = ivr_normalize_option_param($raw_param, $ivr_menu_context);
                 } else {
                     // Parse combined action:param format (e.g., "menu-exec-app:transfer 1001 XML ctx")
                     $options_array = explode(":", $raw_param, 2);
                     $ivr_menu_option_action = $options_array[0];
-                    $ivr_menu_option_param = isset($options_array[1]) ? $options_array[1] : '';
+                    $ivr_menu_option_param = ivr_normalize_option_param(
+                        isset($options_array[1]) ? $options_array[1] : '', $ivr_menu_context);
                 }
 
                 $opt_sql = "INSERT INTO v_ivr_menu_options (
