@@ -80,20 +80,26 @@ function do_action($body) {
             }
 
             foreach ($channels_data['rows'] as $channel) {
-                // Extract domain from presence_id, context, or name
+                // Resolve the channel's domain EXACTLY as the FusionPBX GUI does
+                // (app/calls_active/calls_active_inc.php): prefer `context`,
+                // ignoring the shared "public"/"default" contexts and stripping
+                // any user@ prefix, then fall back to `presence_id`.
+                //
+                // Precedence matters. Reversing it (presence_id first) made a
+                // channel whose context and presence_id disagree land under a
+                // different domain than FusionPBX shows it under, and a context
+                // like "100@d.com" was compared raw so the call disappeared
+                // from the dashboard while still being visible in FusionPBX.
                 $channel_domain = null;
+                $channel_context = isset($channel['context']) ? $channel['context'] : '';
 
-                // Try presence_id first (e.g., "1001@domain.com")
-                if (!empty($channel['presence_id'])) {
-                    $parts = explode('@', $channel['presence_id']);
-                    if (count($parts) > 1) {
-                        $channel_domain = $parts[1];
-                    }
+                if ($channel_context !== '' && $channel_context !== 'public' && $channel_context !== 'default') {
+                    $channel_domain = (strpos($channel_context, '@') !== false)
+                        ? explode('@', $channel_context)[1]
+                        : $channel_context;
                 }
-
-                // Fallback to context (e.g., "aamartaka.cosmocom.net")
-                if (empty($channel_domain) && !empty($channel['context'])) {
-                    $channel_domain = $channel['context'];
+                elseif (!empty($channel['presence_id']) && strpos($channel['presence_id'], '@') !== false) {
+                    $channel_domain = explode('@', $channel['presence_id'])[1];
                 }
 
                 // If domain filter is provided, skip non-matching calls
