@@ -45,6 +45,7 @@ function do_action($body) {
         "hangup_cause",
         "duration",
         "billsec",
+        "waitsec",
         "missed_call",
         "record_name",
         "bridge_uuid",
