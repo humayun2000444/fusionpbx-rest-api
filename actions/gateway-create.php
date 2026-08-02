@@ -1,8 +1,66 @@
 <?php
 $required_params = array("gateway", "proxy");
 
+/**
+ * Resolve the domain a gateway belongs to, the way the GUI does.
+ *
+ * app/gateways/gateway_edit.php forces $_SESSION['domain_uuid'] for anyone
+ * without the 'gateway_domain' permission, and only a user who has it may pick
+ * a specific domain or "Global" (domain_uuid NULL). REST has no session, so the
+ * old `isset($body->domain_uuid) ? ... : $domain_uuid` fallback quietly resolved
+ * to NULL whenever the caller omitted the field - producing a global gateway
+ * that no tenant can see (list-by-domain filters on domain_uuid) and that the
+ * caller believed it had created inside its own domain.
+ *
+ * Now: a supplied domain_uuid must be a real domain, and a missing one is an
+ * error unless the caller explicitly opts into a global gateway with
+ * "global": true - the API equivalent of choosing "Global" in the GUI.
+ *
+ * Returns array("error" => ...) on failure, or array("domain_uuid" => uuid|null).
+ */
+if (!function_exists('gateway_resolve_domain_uuid')) {
+function gateway_resolve_domain_uuid($body, $session_domain_uuid) {
+    $database = new database;
+
+    $requested = isset($body->domain_uuid) ? trim((string) $body->domain_uuid) : '';
+    if ($requested === '' && !empty($session_domain_uuid)) {
+        $requested = trim((string) $session_domain_uuid);
+    }
+
+    if ($requested !== '') {
+        if (!preg_match('/^[0-9a-fA-F-]{36}$/', $requested)) {
+            return array("error" => "invalid domain_uuid");
+        }
+        $exists = $database->select(
+            "SELECT domain_uuid FROM v_domains WHERE domain_uuid = :domain_uuid",
+            array("domain_uuid" => $requested), 'column');
+        if (!$exists) {
+            return array("error" => "domain_uuid does not match any domain");
+        }
+        return array("domain_uuid" => $requested);
+    }
+
+    // No domain anywhere: only proceed if the caller deliberately asked for a
+    // global gateway, otherwise fail loudly instead of orphaning the record.
+    $global = isset($body->global) ? $body->global : null;
+    $wants_global = ($global === true || $global === 1
+        || (is_string($global) && in_array(strtolower($global), array('true','1','yes'), true)));
+    if ($wants_global) {
+        return array("domain_uuid" => null);
+    }
+
+    return array("error" => "domain_uuid is required (or pass global=true to create a gateway not bound to a domain)");
+}
+}
+
 function do_action($body) {
     global $domain_uuid;
+
+    $resolved = gateway_resolve_domain_uuid($body, $domain_uuid);
+    if (isset($resolved["error"])) {
+        return array("error" => $resolved["error"], "code" => 400);
+    }
+    $gateway_domain_uuid = $resolved["domain_uuid"];
 
     // Check if gateway name already exists
     $sql = "SELECT gateway_uuid FROM v_gateways WHERE gateway = :gateway";
@@ -33,7 +91,7 @@ function do_action($body) {
             :extension_in_contact, :context, :profile, :hostname, :enabled, :description, NOW())";
 
     $parameters["gateway_uuid"] = $gateway_uuid;
-    $parameters["domain_uuid"] = isset($body->domain_uuid) ? $body->domain_uuid : $domain_uuid;
+    $parameters["domain_uuid"] = $gateway_domain_uuid;
     $parameters["gateway"] = $body->gateway;
     $parameters["username"] = isset($body->username) ? $body->username : null;
     $parameters["password"] = isset($body->password) ? $body->password : null;

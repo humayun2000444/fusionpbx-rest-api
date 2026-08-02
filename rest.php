@@ -3,6 +3,14 @@ require_once "root.php";
 require_once "resources/require.php";
 require_once "lib/input_validation.php";
 
+// Every response this endpoint produces is JSON, but PHP was letting the default
+// text/html content type stand. Clients that dispatch on Content-Type (rather
+// than sniffing the body) treat a perfectly good JSON reply as an HTML error
+// page. Declared once here so both the error and success paths inherit it.
+if(!headers_sent()) {
+	header("Content-Type: application/json");
+}
+
 function return_error($msg, $code=500) {
 	http_response_code($code);
 	echo json_encode(array("error" => $msg));
@@ -25,7 +33,16 @@ if(!$secret) {
 }
 
 // verify the hash
-if(password_verify($secret, $_SERVER['PHP_AUTH_PW'])) {
+//
+// password_verify() is password_verify($plaintext, $hash) and returns TRUE on a
+// match. The call below used to pass the arguments the other way round AND treat
+// a TRUE result as a failure. Because $_SERVER['PHP_AUTH_PW'] is not a valid
+// hash, the swapped call always returned FALSE, the branch never fired, and
+// *every* secret was accepted for any key_uuid that existed - a full auth
+// bypass. Verified against the live key table: the stored secrets are bcrypt,
+// password_verify($plaintext, $stored) is TRUE for a good secret and FALSE for
+// a bad one, so legitimate clients keep working under the corrected call.
+if(!password_verify($_SERVER['PHP_AUTH_PW'], $secret)) {
 	error_log("rejecting request with valid token identifier but invalid secret");
 	return_error("unauthorized", 401);
 }
