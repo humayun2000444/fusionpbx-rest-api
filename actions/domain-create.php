@@ -17,8 +17,10 @@
 //   domain_description | description  (optional)
 //   domain_enabled | enabled          (optional, default true - the GUI always
 //                                      creates enabled; pass false deliberately)
-//   time_zone      | timeZone         (optional, e.g. "Asia/Dhaka" - omit to
-//                                      inherit the global domain/time_zone default)
+//   time_zone      | timeZone         (optional, e.g. "Asia/Dhaka" - when omitted
+//                                      the global domain/time_zone default is
+//                                      resolved and written explicitly, so every
+//                                      domain always ends up with a time zone)
 
 $required_params = array();
 
@@ -140,15 +142,40 @@ function do_action($body) {
 	// Default dialplans - this is the step whose absence broke call recording.
 	$import = domain_create_import_dialplans($domain_uuid, $domain_name);
 
-	// Optional per-domain time zone. Without one the domain inherits the global
-	// default setting (domain/time_zone); that default is what decides how the
-	// FusionPBX UI renders CDR timestamps, so a wrong value shows every call at
-	// the wrong wall-clock time even though start_stamp is stored correctly in UTC.
+	// Every domain gets an explicit per-domain time zone - the caller does not
+	// have to supply one. The time zone decides how the FusionPBX UI renders CDR
+	// timestamps, so a wrong or absent value shows every call at the wrong
+	// wall-clock time even though start_stamp is stored correctly in UTC. Relying
+	// on inheritance made that failure invisible: the domain looked fine and the
+	// clock was simply hours out.
+	//
+	// Resolution order: the request, else the global domain/time_zone default,
+	// else PHP's own default. Writing it explicitly means the value is visible in
+	// v_domain_settings rather than implied. Trade-off: a domain pinned this way
+	// no longer follows a later change to the global default - change it per
+	// domain, or clear the row to return it to inheritance.
 	$time_zone = null;
-	if (isset($body->time_zone)) { $time_zone = trim($body->time_zone); }
-	elseif (isset($body->timeZone)) { $time_zone = trim($body->timeZone); }
+	$time_zone_source = null;
+	if (isset($body->time_zone) && trim($body->time_zone) !== '') {
+		$time_zone = trim($body->time_zone);
+		$time_zone_source = 'request';
+	}
+	elseif (isset($body->timeZone) && trim($body->timeZone) !== '') {
+		$time_zone = trim($body->timeZone);
+		$time_zone_source = 'request';
+	}
 
 	$time_zone_set = null;
+	if (empty($time_zone)) {
+		$tz_settings = new settings(array('domain_uuid' => $domain_uuid));
+		$time_zone = $tz_settings->get('domain', 'time_zone', '');
+		$time_zone_source = 'default_setting';
+		if (empty($time_zone)) {
+			$time_zone = date_default_timezone_get();
+			$time_zone_source = 'php_default';
+		}
+	}
+
 	if (!empty($time_zone)) {
 		// Reject a bad identifier rather than storing it: PHP would fall back to
 		// UTC at render time and the mistake would only surface as times being
@@ -239,7 +266,8 @@ function do_action($body) {
 		'domain_enabled' => $domain_enabled,
 		'domain_description' => $domain_description,
 		'dialplan_count' => $dialplan_count,
-		'time_zone' => $time_zone_set,        // null = inherits the global default
+		'time_zone' => $time_zone_set,
+		'time_zone_source' => $time_zone_set ? $time_zone_source : null,
 		'directories_created' => $directories,
 		'reloaded' => $reloaded
 	);
