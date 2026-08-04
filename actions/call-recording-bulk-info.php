@@ -139,9 +139,14 @@ function do_action($body) {
 }
 
 function get_recording_by_uuid($database, $uuid) {
+    // caller / destination / date are selected so the caller can name the file
+    // after the call rather than its uuid. The date-range branch above already
+    // returned them; this branch did not, so bulk zips built from a uuid list
+    // came out full of uuid-named files.
     // Try view_call_recordings first
     $sql = "SELECT
-                call_recording_uuid, call_recording_path, call_recording_name
+                call_recording_uuid, call_recording_path, call_recording_name,
+                caller_id_number, destination_number, call_recording_date AS start_stamp
             FROM view_call_recordings
             WHERE call_recording_uuid = :uuid";
 
@@ -152,7 +157,10 @@ function get_recording_by_uuid($database, $uuid) {
         $sql2 = "SELECT
                     xml_cdr_uuid as call_recording_uuid,
                     record_path as call_recording_path,
-                    record_name as call_recording_name
+                    record_name as call_recording_name,
+                    caller_id_number,
+                    destination_number,
+                    start_stamp
                 FROM v_xml_cdr
                 WHERE xml_cdr_uuid = :uuid
                 AND record_name IS NOT NULL AND record_name != ''";
@@ -166,7 +174,11 @@ function get_recording_by_uuid($database, $uuid) {
                 "uuid" => $record["call_recording_uuid"],
                 "path" => $full_path,
                 "name" => $record["call_recording_name"],
-                "size" => filesize($full_path)
+                "size" => filesize($full_path),
+                // same keys the date-range branch uses, so consumers see one shape
+                "date" => isset($record["start_stamp"]) ? $record["start_stamp"] : null,
+                "caller" => isset($record["caller_id_number"]) ? $record["caller_id_number"] : null,
+                "destination" => isset($record["destination_number"]) ? $record["destination_number"] : null
             );
         }
     }
