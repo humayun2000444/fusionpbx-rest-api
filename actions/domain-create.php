@@ -17,6 +17,8 @@
 //   domain_description | description  (optional)
 //   domain_enabled | enabled          (optional, default true - the GUI always
 //                                      creates enabled; pass false deliberately)
+//   time_zone      | timeZone         (optional, e.g. "Asia/Dhaka" - omit to
+//                                      inherit the global domain/time_zone default)
 
 $required_params = array();
 
@@ -138,6 +140,51 @@ function do_action($body) {
 	// Default dialplans - this is the step whose absence broke call recording.
 	$import = domain_create_import_dialplans($domain_uuid, $domain_name);
 
+	// Optional per-domain time zone. Without one the domain inherits the global
+	// default setting (domain/time_zone); that default is what decides how the
+	// FusionPBX UI renders CDR timestamps, so a wrong value shows every call at
+	// the wrong wall-clock time even though start_stamp is stored correctly in UTC.
+	$time_zone = null;
+	if (isset($body->time_zone)) { $time_zone = trim($body->time_zone); }
+	elseif (isset($body->timeZone)) { $time_zone = trim($body->timeZone); }
+
+	$time_zone_set = null;
+	if (!empty($time_zone)) {
+		// Reject a bad identifier rather than storing it: PHP would fall back to
+		// UTC at render time and the mistake would only surface as times being
+		// silently hours out.
+		if (!in_array($time_zone, timezone_identifiers_list(), true)) {
+			$time_zone_error = 'invalid time_zone: ' . $time_zone;
+		}
+		else {
+			$ts = array();
+			$ts['domain_settings'][0]['domain_setting_uuid'] = uuid();
+			$ts['domain_settings'][0]['domain_uuid'] = $domain_uuid;
+			$ts['domain_settings'][0]['app_uuid'] = '2c2453c0-1bea-4475-9f44-4d969650de09';
+			$ts['domain_settings'][0]['domain_setting_category'] = 'domain';
+			$ts['domain_settings'][0]['domain_setting_subcategory'] = 'time_zone';
+			$ts['domain_settings'][0]['domain_setting_name'] = 'name';
+			$ts['domain_settings'][0]['domain_setting_value'] = $time_zone;
+			$ts['domain_settings'][0]['domain_setting_enabled'] = 'true';
+
+			$permission->add('domain_setting_add', 'temp');
+			$db_ts = new database;
+			$db_ts->app_name = 'domain_settings';
+			$db_ts->app_uuid = '2c2453c0-1bea-4475-9f44-4d969650de09';
+			$db_ts->save($ts);
+			$permission->delete('domain_setting_add', 'temp');
+
+			$verify = new database;
+			$time_zone_set = $verify->select(
+				"SELECT domain_setting_value FROM v_domain_settings
+				 WHERE domain_uuid = :domain_uuid AND domain_setting_subcategory = 'time_zone'",
+				array('domain_uuid' => $domain_uuid), 'column');
+			if (empty($time_zone_set)) {
+				$time_zone_error = 'time_zone could not be saved';
+			}
+		}
+	}
+
 	// Hand the elevated permissions back before returning.
 	foreach ($granted as $p) { $permission->delete($p, 'temp'); }
 
@@ -192,9 +239,17 @@ function do_action($body) {
 		'domain_enabled' => $domain_enabled,
 		'domain_description' => $domain_description,
 		'dialplan_count' => $dialplan_count,
+		'time_zone' => $time_zone_set,        // null = inherits the global default
 		'directories_created' => $directories,
 		'reloaded' => $reloaded
 	);
+
+	// The domain is usable without a time zone (it inherits the default), so this
+	// is a warning rather than a failure - but say it, because the symptom
+	// otherwise is just "the clock is wrong" months later.
+	if (!empty($time_zone_error)) {
+		$response['warning'] = $time_zone_error . ' - domain created and inherits the default time zone';
+	}
 
 	// A domain with no dialplans is the exact failure this action exists to
 	// prevent, so surface it instead of returning a clean success.
