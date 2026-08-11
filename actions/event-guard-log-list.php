@@ -41,6 +41,18 @@ function do_action($body) {
     }
     $order = strtolower($order) === 'asc' ? 'asc' : 'desc';
 
+    // log_date is a timestamptz stored in UTC. Returning it raw made every REST
+    // consumer (admin dashboard, tenant portal) render UTC while the FusionPBX
+    // GUI showed local time. Format it here using the same setting the GUI uses.
+    $database = new database;
+    $time_zone = $database->select(
+        "SELECT default_setting_value FROM v_default_settings "
+        . "WHERE default_setting_category = 'domain' "
+        . "AND default_setting_subcategory = 'time_zone' "
+        . "AND default_setting_enabled = 'true' LIMIT 1",
+        null, 'column');
+    if (empty($time_zone)) { $time_zone = date_default_timezone_get(); }
+
     $parameters = [];
     $where_clauses = ["true"];
 
@@ -73,10 +85,12 @@ function do_action($body) {
 
     // Get data
     $offset = $rows_per_page * $page;
-    $sql = "SELECT event_guard_log_uuid, hostname, log_date, filter, ip_address, extension, user_agent, log_status ";
+    $sql = "SELECT event_guard_log_uuid, hostname, log_date, filter, ip_address, extension, user_agent, log_status, ";
+    $sql .= "to_char(timezone(:time_zone, log_date), 'DD Mon YYYY HH12:MI:SS am') as log_date_formatted ";
     $sql .= "FROM v_event_guard_logs WHERE " . $where_sql . " ";
     $sql .= "ORDER BY " . $order_by . " " . $order . " ";
     $sql .= "LIMIT :limit OFFSET :offset";
+    $parameters['time_zone'] = $time_zone;
     $parameters['limit'] = $rows_per_page;
     $parameters['offset'] = $offset;
 
@@ -90,7 +104,7 @@ function do_action($body) {
             $logs[] = [
                 'eventGuardLogUuid' => $row['event_guard_log_uuid'],
                 'hostname' => $row['hostname'],
-                'logDate' => $row['log_date'],
+                'logDate' => !empty($row['log_date_formatted']) ? $row['log_date_formatted'] : $row['log_date'],
                 'filter' => $row['filter'],
                 'ipAddress' => $row['ip_address'],
                 'extension' => $ext_parts[0],
@@ -104,7 +118,7 @@ function do_action($body) {
     // Get summary stats
     $stats_sql = "SELECT log_status, count(*) as cnt FROM v_event_guard_logs WHERE " . implode(" AND ", array_slice($where_clauses, 0, count($where_clauses))) . " GROUP BY log_status";
     $stats_params = $parameters;
-    unset($stats_params['limit'], $stats_params['offset']);
+    unset($stats_params['limit'], $stats_params['offset'], $stats_params['time_zone']);
     $database = new database;
     $stats_rows = $database->select($stats_sql, !empty($stats_params) ? $stats_params : null, 'all');
 
