@@ -8,6 +8,24 @@ function do_action($body) {
     // Get domain_uuid - use provided or global
     $cr_domain_uuid = isset($body->domain_uuid) ? $body->domain_uuid : $domain_uuid;
 
+    // Extension filter. view_call_recordings has no extension column: an
+    // extension is the caller on outbound calls and the destination on inbound,
+    // so it has to be matched against either side.
+    //
+    // TelcoREST forwards only a fixed set of parameters and silently drops
+    // anything it does not know, so "extension" cannot be sent directly until
+    // the jar is rebuilt. Until then the frontend passes it through the
+    // already-forwarded "search" slot as "ext:201", or "ext:201::some text"
+    // when a free-text search is active at the same time.
+    $cr_extension = null;
+    $cr_search = isset($body->search) ? trim($body->search) : '';
+    if (!empty($body->extension)) {
+        $cr_extension = trim($body->extension);
+    } elseif ($cr_search !== '' && preg_match('/^ext:([^:]+)(?:::(.*))?$/i', $cr_search, $m)) {
+        $cr_extension = trim($m[1]);
+        $cr_search = isset($m[2]) ? trim($m[2]) : '';
+    }
+
     // Build the SQL query using the view_call_recordings view
     $sql = "SELECT * FROM view_call_recordings WHERE 1=1 ";
     $parameters = array();
@@ -57,13 +75,19 @@ function do_action($body) {
         $parameters["call_direction"] = $body->call_direction;
     }
 
+    // Filter by extension (exact match on either leg)
+    if (!empty($cr_extension)) {
+        $sql .= "AND (caller_id_number = :extension OR destination_number = :extension) ";
+        $parameters["extension"] = $cr_extension;
+    }
+
     // Search across multiple fields
-    if (!empty($body->search)) {
+    if ($cr_search !== '') {
         $sql .= "AND (LOWER(caller_id_name) LIKE :search
                  OR caller_id_number LIKE :search
                  OR destination_number LIKE :search
                  OR call_recording_name LIKE :search) ";
-        $parameters["search"] = "%" . strtolower($body->search) . "%";
+        $parameters["search"] = "%" . strtolower($cr_search) . "%";
     }
 
     // Order by date descending (most recent first)
@@ -131,12 +155,17 @@ function do_action($body) {
         $count_params["call_direction"] = $body->call_direction;
     }
 
-    if (!empty($body->search)) {
+    if (!empty($cr_extension)) {
+        $count_sql .= "AND (caller_id_number = :extension OR destination_number = :extension) ";
+        $count_params["extension"] = $cr_extension;
+    }
+
+    if ($cr_search !== '') {
         $count_sql .= "AND (LOWER(caller_id_name) LIKE :search
                  OR caller_id_number LIKE :search
                  OR destination_number LIKE :search
                  OR call_recording_name LIKE :search) ";
-        $count_params["search"] = "%" . strtolower($body->search) . "%";
+        $count_params["search"] = "%" . strtolower($cr_search) . "%";
     }
 
     $database = new database;
