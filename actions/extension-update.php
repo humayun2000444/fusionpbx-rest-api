@@ -127,6 +127,43 @@ function do_action($body) {
         "follow_me_uuid" => "follow_me_uuid"
     );
 
+    // Music on hold accepts either a local_stream:// URL or a path to one of the
+    // domain's recordings. The portal cannot build that path itself - the
+    // recordings list is served from JPA and carries no path, and the recordings
+    // directory is a server-side setting - so it sends "recording:<uuid>" and it
+    // is resolved here. The lookup is scoped to THIS extension's own domain, so
+    // one tenant cannot point at another tenant's audio.
+    foreach (array('holdMusic', 'hold_music') as $hm_key) {
+        if (!isset($body->$hm_key) || !is_string($body->$hm_key)) { continue; }
+        if (!preg_match('/^recording:([0-9a-fA-F-]{36})$/', trim($body->$hm_key), $hm)) { continue; }
+
+        $rec = $database->select(
+            "SELECT recording_filename FROM v_recordings "
+            ."WHERE recording_uuid = :recording_uuid AND domain_uuid = :domain_uuid",
+            array("recording_uuid" => $hm[1], "domain_uuid" => $extension['domain_uuid']),
+            "row"
+        );
+        if (empty($rec['recording_filename'])) {
+            return array(
+                "success" => false,
+                "error" => "Recording not found in this domain: " . $hm[1]
+            );
+        }
+
+        $dir_row = $database->select(
+            "SELECT default_setting_value FROM v_default_settings "
+            ."WHERE default_setting_category = 'switch' "
+            ."AND default_setting_subcategory = 'recordings' "
+            ."AND default_setting_enabled = 'true' LIMIT 1",
+            array(), "row"
+        );
+        $rec_dir = !empty($dir_row['default_setting_value'])
+            ? rtrim($dir_row['default_setting_value'], '/')
+            : '/var/lib/freeswitch/recordings';
+
+        $body->$hm_key = $rec_dir . '/' . $extension['domain_name'] . '/' . $rec['recording_filename'];
+    }
+
     // Process each field in the request
     foreach ($body as $key => $value) {
         if ($key === 'extensionUuid' || $key === 'extension_uuid') continue;
