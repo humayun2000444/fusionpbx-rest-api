@@ -42,6 +42,32 @@ function do_action($body) {
     // Get ring group data
     $ring_group_name = preg_replace("/[^A-Za-z0-9\- ]/", "", $body->ring_group_name);
     $ring_group_greeting = isset($body->ring_group_greeting) ? $body->ring_group_greeting : null;
+
+    // The greeting is stored as the recording FILENAME: find_file.lua looks it
+    // up as <recordings_dir>/<domain>/<value>. A client that sends the
+    // recording's display name instead produces a ring group that answers and
+    // then plays nothing, which is exactly what happened on pbx-ls-1353. Map a
+    // name onto its filename before saving, scoped to this ring group's own
+    // domain so one tenant cannot point at another tenant's audio.
+    if (!empty($ring_group_greeting) && is_string($ring_group_greeting)) {
+        $rg_greeting = trim($ring_group_greeting);
+        if ($rg_greeting !== '' && strpos($rg_greeting, '/') === false) {
+            $rg_is_filename = $database->select(
+                "SELECT recording_uuid FROM v_recordings "
+                ."WHERE domain_uuid = :domain_uuid AND recording_filename = :greeting LIMIT 1",
+                array("domain_uuid" => $rg_domain_uuid, "greeting" => $rg_greeting), "row");
+            if (empty($rg_is_filename)) {
+                $rg_by_name = $database->select(
+                    "SELECT recording_filename FROM v_recordings "
+                    ."WHERE domain_uuid = :domain_uuid AND recording_name = :greeting LIMIT 1",
+                    array("domain_uuid" => $rg_domain_uuid, "greeting" => $rg_greeting), "row");
+                if (!empty($rg_by_name['recording_filename'])) {
+                    $ring_group_greeting = $rg_by_name['recording_filename'];
+                }
+            }
+        }
+    }
+
     $ring_group_strategy = isset($body->ring_group_strategy) ? $body->ring_group_strategy : "simultaneous";
     $ring_group_call_timeout = isset($body->ring_group_call_timeout) ? (int)$body->ring_group_call_timeout : 30;
     $ring_group_forward_destination = isset($body->ring_group_forward_destination) ? $body->ring_group_forward_destination : null;
