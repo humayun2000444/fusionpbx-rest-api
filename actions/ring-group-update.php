@@ -71,6 +71,51 @@ function do_action($body) {
     $ring_group_forward_toll_allow = isset($body->ring_group_forward_toll_allow) ? $body->ring_group_forward_toll_allow : $rg["ring_group_forward_toll_allow"];
     $ring_group_context = $domain_name;
 
+    // Normalise the timeout destination into exactly what the FusionPBX GUI
+    // writes: "transfer" + "<number> XML <domain_name>". The portal only holds
+    // the domain UUID, never the domain name, so it sends the bare number and
+    // the context is appended here.
+    //
+    // Note "voicemail" is NOT a valid app: FusionPBX routes voicemail through
+    // the global *99[ext] dialplan and a Lua app, and mod_voicemail is not
+    // loaded. Executing it directly drops the caller with
+    // DESTINATION_OUT_OF_ORDER, which is what ring group 8000 was doing.
+    if (!empty($ring_group_timeout_app) && $ring_group_timeout_app === 'voicemail') {
+        $vm_box = trim((string)$ring_group_timeout_data);
+        if ($vm_box === '') {
+            return array("success" => false,
+                "error" => "A voicemail timeout destination needs a mailbox number");
+        }
+        $ring_group_timeout_app  = 'transfer';
+        $ring_group_timeout_data = '*' . '99' . preg_replace('/\D/', '', $vm_box);
+    }
+
+    if (!empty($ring_group_timeout_app) && $ring_group_timeout_app === 'transfer') {
+        $rg_to = trim((string)$ring_group_timeout_data);
+        if ($rg_to === '') {
+            return array("success" => false,
+                "error" => "A transfer timeout destination needs a number");
+        }
+        // Validate a *99 mailbox actually exists in this domain, so the ring
+        // group cannot time out into a box that was never created.
+        if (preg_match('/^\*99(\d+)/', $rg_to, $vm_m)) {
+            $vm_row = $database->select(
+                "SELECT voicemail_uuid FROM v_voicemails "
+                ."WHERE domain_uuid = :domain_uuid AND voicemail_id = :vm_id "
+                ."AND voicemail_enabled = 'true' LIMIT 1",
+                array("domain_uuid" => $rg_domain_uuid, "vm_id" => $vm_m[1]), "row");
+            if (empty($vm_row)) {
+                return array("success" => false,
+                    "error" => "No enabled voicemail box for extension " . $vm_m[1]);
+            }
+        }
+        if (stripos($rg_to, ' XML ') === false) {
+            $rg_to = $rg_to . ' XML ' . $domain_name;
+        }
+        $ring_group_timeout_data = $rg_to;
+    }
+
+
     // Handle boolean fields
     if (isset($body->ring_group_forward_enabled)) {
         $ring_group_forward_enabled = ($body->ring_group_forward_enabled === true || $body->ring_group_forward_enabled === "true") ? "true" : "false";
@@ -170,6 +215,105 @@ function do_action($body) {
     $database = new database;
     $database->execute($sql, $parameters);
     unset($parameters);
+
+
+    // Replace the destination list when the client sends one. The GUI edits
+    // destinations inline, so the REST update has to as well - without this the
+    // portal could only offer "delete the ring group and create a new one".
+    // Omitting "destinations" entirely leaves the existing rows untouched, so
+    // callers that only change a name or timeout are unaffected.
+    if (isset($body->destinations) && is_array($body->destinations)) {
+        $rg_dests = array();
+        foreach ($body->destinations as $dest) {
+            if (is_object($dest)) { $dest = (array) $dest; }
+
+            $dest_number = null;
+            if (isset($dest['destination_number'])) {
+                $dest_number = $dest['destination_number'];
+            } elseif (isset($dest['destinationNumber'])) {
+                $dest_number = $dest['destinationNumber'];
+            }
+            if (empty($dest_number)) { continue; }
+
+            $dest_delay = 0;
+            if (isset($dest['destination_delay'])) {
+                $dest_delay = (int)$dest['destination_delay'];
+            } elseif (isset($dest['destinationDelay'])) {
+                $dest_delay = (int)$dest['destinationDelay'];
+            }
+
+            $dest_timeout = 30;
+            if (isset($dest['destination_timeout'])) {
+                $dest_timeout = (int)$dest['destination_timeout'];
+            } elseif (isset($dest['destinationTimeout'])) {
+                $dest_timeout = (int)$dest['destinationTimeout'];
+            }
+
+            $dest_enabled = "true";
+            if (isset($dest['destination_enabled'])) {
+                $dest_enabled = $dest['destination_enabled'] ? "true" : "false";
+            } elseif (isset($dest['destinationEnabled'])) {
+                $dest_enabled = $dest['destinationEnabled'] ? "true" : "false";
+            }
+
+            // destination_prompt is numeric: null or a number, never an empty string
+            $dest_prompt = null;
+            if (isset($dest['destination_prompt']) && $dest['destination_prompt'] !== '' && $dest['destination_prompt'] !== null) {
+                $dest_prompt = (int)$dest['destination_prompt'];
+            } elseif (isset($dest['destinationPrompt']) && $dest['destinationPrompt'] !== '' && $dest['destinationPrompt'] !== null) {
+                $dest_prompt = (int)$dest['destinationPrompt'];
+            }
+
+            $dest_description = null;
+            if (isset($dest['destination_description']) && $dest['destination_description'] !== '') {
+                $dest_description = $dest['destination_description'];
+            } elseif (isset($dest['destinationDescription']) && $dest['destinationDescription'] !== '') {
+                $dest_description = $dest['destinationDescription'];
+            }
+
+            $rg_dests[] = array(
+                "number" => $dest_number, "delay" => $dest_delay,
+                "timeout" => $dest_timeout, "enabled" => $dest_enabled,
+                "prompt" => $dest_prompt, "description" => $dest_description,
+            );
+        }
+
+        // A ring group with no destinations answers and then drops the caller,
+        // so refuse an empty list rather than writing one.
+        if (count($rg_dests) === 0) {
+            return array("success" => false, "error" => "At least one destination is required");
+        }
+
+        $database = new database;
+        $database->execute(
+            "DELETE FROM v_ring_group_destinations "
+            ."WHERE ring_group_uuid = :ring_group_uuid AND domain_uuid = :domain_uuid",
+            array("ring_group_uuid" => $ring_group_uuid, "domain_uuid" => $rg_domain_uuid));
+
+        foreach ($rg_dests as $d) {
+            $database->execute(
+                "INSERT INTO v_ring_group_destinations ("
+                ."ring_group_destination_uuid, domain_uuid, ring_group_uuid, "
+                ."destination_number, destination_delay, destination_timeout, "
+                ."destination_enabled, destination_prompt, destination_description, insert_date"
+                .") VALUES ("
+                .":dest_uuid, :domain_uuid, :ring_group_uuid, "
+                .":destination_number, :destination_delay, :destination_timeout, "
+                .":destination_enabled, :destination_prompt, :destination_description, NOW())",
+                array(
+                    "dest_uuid" => uuid(),
+                    "domain_uuid" => $rg_domain_uuid,
+                    "ring_group_uuid" => $ring_group_uuid,
+                    "destination_number" => $d["number"],
+                    "destination_delay" => $d["delay"],
+                    "destination_timeout" => $d["timeout"],
+                    "destination_enabled" => $d["enabled"],
+                    "destination_prompt" => $d["prompt"],
+                    "destination_description" => $d["description"],
+                ));
+        }
+        unset($parameters);
+    }
 
     // Update dialplan record using direct SQL
     $sql = "UPDATE v_dialplans SET

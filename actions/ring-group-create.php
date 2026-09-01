@@ -90,6 +90,51 @@ function do_action($body) {
     $ring_group_forward_toll_allow = isset($body->ring_group_forward_toll_allow) ? $body->ring_group_forward_toll_allow : null;
     $ring_group_context = $domain_name;
 
+    // Normalise the timeout destination into exactly what the FusionPBX GUI
+    // writes: "transfer" + "<number> XML <domain_name>". The portal only holds
+    // the domain UUID, never the domain name, so it sends the bare number and
+    // the context is appended here.
+    //
+    // Note "voicemail" is NOT a valid app: FusionPBX routes voicemail through
+    // the global *99[ext] dialplan and a Lua app, and mod_voicemail is not
+    // loaded. Executing it directly drops the caller with
+    // DESTINATION_OUT_OF_ORDER, which is what ring group 8000 was doing.
+    if (!empty($ring_group_timeout_app) && $ring_group_timeout_app === 'voicemail') {
+        $vm_box = trim((string)$ring_group_timeout_data);
+        if ($vm_box === '') {
+            return array("success" => false,
+                "error" => "A voicemail timeout destination needs a mailbox number");
+        }
+        $ring_group_timeout_app  = 'transfer';
+        $ring_group_timeout_data = '*' . '99' . preg_replace('/\D/', '', $vm_box);
+    }
+
+    if (!empty($ring_group_timeout_app) && $ring_group_timeout_app === 'transfer') {
+        $rg_to = trim((string)$ring_group_timeout_data);
+        if ($rg_to === '') {
+            return array("success" => false,
+                "error" => "A transfer timeout destination needs a number");
+        }
+        // Validate a *99 mailbox actually exists in this domain, so the ring
+        // group cannot time out into a box that was never created.
+        if (preg_match('/^\*99(\d+)/', $rg_to, $vm_m)) {
+            $vm_row = $database->select(
+                "SELECT voicemail_uuid FROM v_voicemails "
+                ."WHERE domain_uuid = :domain_uuid AND voicemail_id = :vm_id "
+                ."AND voicemail_enabled = 'true' LIMIT 1",
+                array("domain_uuid" => $rg_domain_uuid, "vm_id" => $vm_m[1]), "row");
+            if (empty($vm_row)) {
+                return array("success" => false,
+                    "error" => "No enabled voicemail box for extension " . $vm_m[1]);
+            }
+        }
+        if (stripos($rg_to, ' XML ') === false) {
+            $rg_to = $rg_to . ' XML ' . $domain_name;
+        }
+        $ring_group_timeout_data = $rg_to;
+    }
+
+
     // Build the dialplan XML
     $dialplan_xml = "<extension name=\"" . htmlspecialchars($ring_group_name) . "\" continue=\"\" uuid=\"" . $dialplan_uuid . "\">\n";
     $dialplan_xml .= "\t<condition field=\"destination_number\" expression=\"^" . htmlspecialchars($ring_group_extension) . "$\">\n";
