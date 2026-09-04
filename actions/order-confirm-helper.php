@@ -90,7 +90,7 @@ function oc_get_config($database, $domain_uuid) {
             'tts_openai_key' => '', 'tts_openai_voice' => 'nova',
             'ack_text_en' => 'Thank you, your response has been recorded.',
             'ack_text_bn' => 'ধন্যবাদ, আপনার উত্তর গ্রহণ করা হয়েছে।',
-            'reference_label' => 'Order ID', 'recipient_label' => 'Customer', 'entity_label' => 'Order',
+            'reference_label' => 'Reference', 'recipient_label' => 'Recipient', 'entity_label' => 'Request',
             'dtmf_options' => '[{"digit":"1","label":"Confirm","action":"callback","value":"1"},{"digit":"2","label":"Cancel","action":"callback","value":"2"},{"digit":"0","label":"Support","action":"transfer","value":""}]',
         );
         // These are hardcoded code fallbacks, not a per-domain choice, so the
@@ -166,6 +166,7 @@ function oc_resolve_vars($call) {
     $vars['orderId'] = $vars['order_id'];   // legacy alias
     $vars['reference'] = $vars['order_id']; // industry-neutral aliases so a template
     $vars['ref'] = $vars['order_id'];       // can use {reference}/{ref} instead of {order_id}
+    $vars['recipient'] = $vars['name'];     // matches the neutral 'recipient' API field
     if (!empty($call['metadata'])) {
         $meta = is_array($call['metadata']) ? $call['metadata'] : json_decode($call['metadata'], true);
         if (is_array($meta)) {
