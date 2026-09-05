@@ -8,15 +8,19 @@ function do_action($body) {
     // Get domain_uuid - use provided or global
     $cr_domain_uuid = isset($body->domain_uuid) ? $body->domain_uuid : $domain_uuid;
 
-    // Extension filter. view_call_recordings has no extension column: an
-    // extension is the caller on outbound calls and the destination on inbound,
-    // so it has to be matched against either side.
-    //
-    // TelcoREST forwards only a fixed set of parameters and silently drops
-    // anything it does not know, so "extension" cannot be sent directly until
-    // the jar is rebuilt. Until then the frontend passes it through the
-    // already-forwarded "search" slot as "ext:201", or "ext:201::some text"
-    // when a free-text search is active at the same time.
+    // An extension is only reliably identified by extension_uuid. The number
+    // cannot be matched against caller_id_number/destination_number: on an
+    // outbound call the caller id is rewritten to the trunk DID, so on domains
+    // like pbx-stax-349 the extension appears in neither field and the filter
+    // returned nothing. v_xml_cdr carries extension_uuid on every recorded row,
+    // which is what the FusionPBX CDR screen itself filters on.
+    $cr_extension_uuid = null;
+    if (!empty($body->extension_uuid)) {
+        $cr_extension_uuid = trim($body->extension_uuid);
+    }
+
+    // extension_uuid takes precedence over the number match below; ANDing both
+    // returns nothing on any domain whose outbound caller id is rewritten.
     $cr_extension = null;
     $cr_search = isset($body->search) ? trim($body->search) : '';
     if (!empty($body->extension)) {
@@ -24,6 +28,26 @@ function do_action($body) {
     } elseif ($cr_search !== '' && preg_match('/^ext:([^:]+)(?:::(.*))?$/i', $cr_search, $m)) {
         $cr_extension = trim($m[1]);
         $cr_search = isset($m[2]) ? trim($m[2]) : '';
+    }
+
+    // A number on its own cannot identify an extension: on an outbound call the
+    // caller id is rewritten to the trunk DID, so on domains like pbx-stax-349 it
+    // appears in neither caller_id_number nor destination_number. Resolve the
+    // number to a uuid here so callers that only know the number -- the dashboard
+    // before its next deploy, and anything else already in the field -- filter the
+    // same way the FusionPBX CDR screen does. Falls back to the old number match
+    // if the extension cannot be resolved.
+    if (!empty($cr_extension) && empty($cr_extension_uuid) && !empty($cr_domain_uuid)) {
+        $lookup = new database;
+        $found = $lookup->select(
+            "SELECT extension_uuid FROM v_extensions "
+            . "WHERE domain_uuid = :domain_uuid AND extension = :extension LIMIT 1",
+            array("domain_uuid" => $cr_domain_uuid, "extension" => $cr_extension),
+            "column");
+        if (!empty($found)) {
+            $cr_extension_uuid = $found;
+        }
+        unset($lookup);
     }
 
     // Build the SQL query using the view_call_recordings view
@@ -76,9 +100,13 @@ function do_action($body) {
     }
 
     // Filter by extension (exact match on either leg)
-    if (!empty($cr_extension)) {
+    if (!empty($cr_extension) && empty($cr_extension_uuid)) {
         $sql .= "AND (caller_id_number = :extension OR destination_number = :extension) ";
         $parameters["extension"] = $cr_extension;
+    }
+    if (!empty($cr_extension_uuid)) {
+        $sql .= "AND extension_uuid = :extension_uuid ";
+        $parameters["extension_uuid"] = $cr_extension_uuid;
     }
 
     // Search across multiple fields
@@ -155,9 +183,13 @@ function do_action($body) {
         $count_params["call_direction"] = $body->call_direction;
     }
 
-    if (!empty($cr_extension)) {
+    if (!empty($cr_extension) && empty($cr_extension_uuid)) {
         $count_sql .= "AND (caller_id_number = :extension OR destination_number = :extension) ";
         $count_params["extension"] = $cr_extension;
+    }
+    if (!empty($cr_extension_uuid)) {
+        $count_sql .= "AND extension_uuid = :extension_uuid ";
+        $count_params["extension_uuid"] = $cr_extension_uuid;
     }
 
     if ($cr_search !== '') {
