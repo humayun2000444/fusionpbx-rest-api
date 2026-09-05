@@ -373,8 +373,19 @@ function do_action($body) {
         }
     }
 
+    // A "menu-sub" option only works if the target menu points back at this one
+    // (see ivr_sync_submenu_parents) -- the GUI's Parent Menu field.
+    $ivr_linked_submenus = array();
+    if (isset($body->options) && is_array($body->options)) {
+        $ivr_linked_submenus = ivr_sync_submenu_parents(
+            $database, $ivr_menu_uuid, $ivr_domain_uuid, $body->options);
+    }
+
     // Clear the cache - CRITICAL for changes to take effect immediately
     clear_ivr_cache($ivr_menu_uuid, $ivr_menu_context);
+    foreach ($ivr_linked_submenus as $ivr_child_uuid) {
+        clear_ivr_cache($ivr_child_uuid, $ivr_menu_context);
+    }
 
     return array(
         "success" => true,
@@ -384,6 +395,73 @@ function do_action($body) {
         "options_updated" => $options_updated,
         "cache_cleared" => true
     );
+}
+
+/**
+ * Link the menus a "menu-sub" option points at to THIS menu as their parent.
+ *
+ * FusionPBX serves a nested IVR by walking ivr_menu_parent_uuid with a
+ * recursive query (xml_handler .../configuration/ivr.conf.lua): only menus
+ * whose parent chain reaches the one being dialled are emitted into the XML,
+ * each named by its uuid. So a "menu-sub" option resolves ONLY if the TARGET
+ * menu records this menu as its parent. The GUI has a "Parent Menu" field for
+ * that; the REST path never wrote it, so a REST-built nested IVR failed at
+ * call time with "Invalid Menu!" and the trailing hangup() in the IVR dialplan
+ * dropped the call. Deriving the link from the options keeps the API
+ * self-normalizing, so no client has to know about the parent field.
+ *
+ * Returns the child uuids that were linked (used to clear their cached XML).
+ */
+function ivr_sync_submenu_parents($database, $parent_uuid, $domain_uuid, $options) {
+    $targets = array();
+    foreach ((array) $options as $option) {
+        $opt = (object) $option;
+        $action = isset($opt->action) ? trim((string) $opt->action) : '';
+        $param  = isset($opt->param)  ? trim((string) $opt->param)  : '';
+        if ($action !== 'menu-sub') {
+            continue;
+        }
+        // The param must be a menu uuid; anything else is not a sub-menu link.
+        if (!preg_match('/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/', $param)) {
+            continue;
+        }
+        if (strcasecmp($param, $parent_uuid) === 0) {
+            continue;   // a menu cannot be its own parent
+        }
+        $targets[strtolower($param)] = true;
+    }
+    if (empty($targets)) {
+        return array();
+    }
+
+    // Collect this menu's ancestors. Parenting an ancestor underneath us would
+    // close a loop, and the recursive query above has no cycle guard.
+    $ancestors = array();
+    $walk = $parent_uuid;
+    for ($i = 0; $i < 25 && !empty($walk); $i++) {
+        $row = $database->select(
+            "SELECT ivr_menu_parent_uuid FROM v_ivr_menus WHERE ivr_menu_uuid = :u",
+            array("u" => $walk), "row");
+        $walk = !empty($row['ivr_menu_parent_uuid']) ? $row['ivr_menu_parent_uuid'] : null;
+        if (!empty($walk)) {
+            $ancestors[strtolower($walk)] = true;
+        }
+    }
+
+    $linked = array();
+    foreach (array_keys($targets) as $child_uuid) {
+        if (isset($ancestors[$child_uuid])) {
+            continue;   // would create a cycle
+        }
+        $database->execute(
+            "UPDATE v_ivr_menus SET ivr_menu_parent_uuid = :parent_uuid "
+            ."WHERE ivr_menu_uuid = :child_uuid AND domain_uuid = :domain_uuid "
+            ."AND ivr_menu_parent_uuid IS DISTINCT FROM :parent_uuid",
+            array("parent_uuid" => $parent_uuid, "child_uuid" => $child_uuid,
+                  "domain_uuid" => $domain_uuid));
+        $linked[] = $child_uuid;
+    }
+    return $linked;
 }
 
 /**
