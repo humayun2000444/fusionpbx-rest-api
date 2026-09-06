@@ -18,7 +18,7 @@ function do_action($body) {
     $database = new database;
 
     // Verify source exists
-    $sql_check = "SELECT broadcast_name FROM v_call_broadcasts
+    $sql_check = "SELECT broadcast_name, broadcast_phone_numbers FROM v_call_broadcasts
                   WHERE call_broadcast_uuid = :uuid AND domain_uuid = :domain_uuid";
     $source = $database->select($sql_check, array(
         "uuid" => $source_uuid,
@@ -74,14 +74,23 @@ function do_action($body) {
         return array("success" => false, "error" => "Failed to clone broadcast record");
     }
 
-    // No leads copied - fresh campaign, user uploads new leads
+    // The SELECT above carries broadcast_phone_numbers across, so the copy is
+    // startable as it stands. What is NOT copied is v_call_broadcast_leads:
+    // those rows are per-run bookkeeping and get created from the numbers when
+    // the campaign starts. `leadCount` counts those rows, so it is honestly 0
+    // here - which reads as "the copy is empty" unless the numbers are reported
+    // separately.
+    $phone_numbers = isset($source['broadcast_phone_numbers']) ? trim((string) $source['broadcast_phone_numbers']) : '';
+    $phone_count = $phone_numbers === '' ? 0 : count(array_filter(array_map('trim', explode("\n", $phone_numbers))));
 
     return array(
         "success" => true,
         "callBroadcastUuid" => $new_uuid,
         "name" => $new_name,
         "leadCount" => 0,
+        "phoneNumberCount" => $phone_count,
         "clonedFrom" => $source_uuid,
-        "message" => "Campaign cloned with same settings. Upload new leads to start."
+        "message" => "Campaign cloned with the same settings and numbers. "
+                   . "It starts idle, and a one-time schedule date is not carried over."
     );
 }
