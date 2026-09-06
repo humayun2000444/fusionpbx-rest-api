@@ -42,7 +42,19 @@ function do_action($body) {
     $prefix = isset($body->prefix) ? $body->prefix : "";
 
     // Build bridge data
-    $bridge_data = "sofia/gateway/" . $body->gateway_uuid . "/" . $prefix . "\$1";
+    // Optional overrides for routes that are not "send capture group 1 as dialled":
+    //   bridge_suffix        what follows sofia/gateway/<uuid>/   (default: <prefix>$1)
+    //   callee_id_number     value for callee_id_number           (default: $1)
+    //   skip_call_direction  true = do not add the companion call_direction-outbound
+    //                        dialplan (the domain already has one for that pattern
+    //                        family, e.g. short-code and landline routes)
+    // The international route needs these: pattern ^(00|\+)(\d+)$ with bridge $2
+    // strips the 00/+ before the gateway while callee_id_number $1$2 keeps the
+    // dialled form in CDRs.
+    $bridge_suffix = (isset($body->bridge_suffix) && $body->bridge_suffix !== '') ? $body->bridge_suffix : $prefix . "\$1";
+    $bridge_data = "sofia/gateway/" . $body->gateway_uuid . "/" . $bridge_suffix;
+    $callee_id_number = (isset($body->callee_id_number) && $body->callee_id_number !== '') ? $body->callee_id_number : "\$1";
+    $skip_call_direction = isset($body->skip_call_direction) && filter_var($body->skip_call_direction, FILTER_VALIDATE_BOOLEAN);
 
     // Get enabled status
     $dialplan_enabled = isset($body->dialplan_enabled) ? $body->dialplan_enabled : "true";
@@ -68,6 +80,8 @@ function do_action($body) {
     // ========================================
     // DIALPLAN 1: call_direction-outbound (order 22)
     // ========================================
+    $dialplan_uuid_1 = null;
+    if (!$skip_call_direction) {
     $dialplan_uuid_1 = uuid();
 
     $sql = "INSERT INTO v_dialplans (dialplan_uuid, domain_uuid, app_uuid, dialplan_name,
@@ -107,6 +121,7 @@ function do_action($body) {
 
     // Action: export call_direction=outbound (inline)
     insert_detail_inline($dialplan_uuid_1, $route_domain_uuid, 'action', 'export', 'call_direction=outbound', 0, $detail_order += 10, 'true');
+    } // end !skip_call_direction
 
     // ========================================
     // DIALPLAN 2: The actual route (order from request)
@@ -175,7 +190,7 @@ function do_action($body) {
     insert_detail($dialplan_uuid_2, $route_domain_uuid, 'action', 'set', 'ignore_display_updates=true', 0, $detail_order += 10);
 
     // Action: set callee_id_number
-    insert_detail($dialplan_uuid_2, $route_domain_uuid, 'action', 'set', 'callee_id_number=$1', 0, $detail_order += 10);
+    insert_detail($dialplan_uuid_2, $route_domain_uuid, 'action', 'set', 'callee_id_number=' . $callee_id_number, 0, $detail_order += 10);
 
     // Action: set continue_on_fail
     $continue_on_fail = isset($body->continue_on_fail) ? $body->continue_on_fail : '1,2,3,6,18,21,27,28,31,34,38,41,42,44,58,88,111,403,501,602,607,809';
@@ -189,8 +204,10 @@ function do_action($body) {
     // ========================================
 
     // Generate XML for call_direction-outbound dialplan
-    $xml_1 = generate_dialplan_xml($dialplan_uuid_1, "call_direction-outbound", "true");
-    update_dialplan_xml($dialplan_uuid_1, $xml_1);
+    if ($dialplan_uuid_1) {
+        $xml_1 = generate_dialplan_xml($dialplan_uuid_1, "call_direction-outbound", "true");
+        update_dialplan_xml($dialplan_uuid_1, $xml_1);
+    }
 
     // Generate XML for the actual route dialplan
     $dialplan_continue_2 = isset($body->dialplan_continue) ? $body->dialplan_continue : "false";
