@@ -68,6 +68,32 @@ function do_action($body) {
     $broadcast_avmd = $broadcast['broadcast_avmd'];
     $broadcast_accountcode = !empty($broadcast['broadcast_accountcode']) ? $broadcast['broadcast_accountcode'] : $db_domain_name;
     $broadcast_toll_allow = isset($broadcast['broadcast_toll_allow']) ? $broadcast['broadcast_toll_allow'] : '';
+    $broadcast_destination_type = isset($broadcast['broadcast_destination_type']) ? trim($broadcast['broadcast_destination_type']) : '';
+
+    // PLAYBACK destination - the answered party hears a recording instead of
+    // being connected to a person. broadcast_destination_data then holds the
+    // recording FILENAME rather than an extension, resolved against the domain's
+    // recordings directory exactly the way recording-list.php resolves it.
+    // Checked here, before the broadcast is marked running, so a missing file
+    // fails the start instead of dialling the whole list into silence.
+    $broadcast_playback_file = '';
+    if ($broadcast_destination_type === 'playback') {
+        if (empty($broadcast_destination_data)) {
+            return array(
+                "success" => false,
+                "error" => "No recording selected for this broadcast"
+            );
+        }
+        $broadcast_settings = new settings(array("domain_uuid" => $db_domain_uuid));
+        $switch_recordings = $broadcast_settings->get('switch', 'recordings', '/var/lib/freeswitch/recordings');
+        $broadcast_playback_file = $switch_recordings.'/'.$db_domain_name.'/'.basename($broadcast_destination_data);
+        if (!is_readable($broadcast_playback_file)) {
+            return array(
+                "success" => false,
+                "error" => "Recording not found on this server: ".basename($broadcast_destination_data)
+            );
+        }
+    }
 
     // Update status to 'running' first
     $update_sql = "UPDATE v_call_broadcasts SET broadcast_status = 'running', broadcast_last_run = NOW(), update_date = NOW()
@@ -119,6 +145,21 @@ function do_action($body) {
 
     // Check pacing mode
     $pacing_mode = isset($broadcast['broadcast_pacing_mode']) ? $broadcast['broadcast_pacing_mode'] : 'power';
+
+    // Predictive pacing counts free AGENTS in the destination queue. A playback
+    // campaign has no agents, so predictive would read zero and never dial at
+    // all. Pace those by the concurrent limit instead.
+    if ($broadcast_playback_file !== '' && $pacing_mode === 'predictive') {
+        $pacing_mode = 'power';
+    }
+
+    // Where the answered leg goes: a dialplan destination, or the recording.
+    // ${broadcast_audio_file} is expanded by FreeSWITCH when the application
+    // runs, which keeps a filename containing spaces off the originate command
+    // line, where it would be split as an argument.
+    $dial_target = ($broadcast_playback_file !== '')
+        ? '&playback(${broadcast_audio_file})'
+        : $broadcast_destination_data." XML ".$db_domain_name;
 
     // Parse phone numbers
     $phone_numbers = array_filter(explode("\n", trim($broadcast['broadcast_phone_numbers'])));
@@ -237,6 +278,9 @@ function do_action($body) {
             $channel_variables .= ":domain_name=" . $db_domain_name;
             $channel_variables .= ":accountcode='" . $broadcast_accountcode . "'";
             $channel_variables .= ":call_broadcast_uuid=" . $call_broadcast_uuid;
+            if ($broadcast_playback_file !== '') {
+                $channel_variables .= ":broadcast_audio_file='" . $broadcast_playback_file . "'";
+            }
 
             if (!empty($broadcast_toll_allow)) {
                 $channel_variables .= ":toll_allow='" . $broadcast_toll_allow . "'";
@@ -249,7 +293,9 @@ function do_action($body) {
                 // Human: says "Hello?" then waits (quick silence)
                 // Machine: plays long greeting (no quick silence)
                 // Parameters: silence_thresh silence_hits listen_hits timeout_ms
-                $channel_variables .= ":amd_destination=" . $broadcast_destination_data;
+                if ($broadcast_playback_file === '') {
+                    $channel_variables .= ":amd_destination=" . $broadcast_destination_data;
+                }
                 $channel_variables .= ":execute_on_answer='wait_for_silence 200 25 3 4000'";
 
                 // Build origination URL
@@ -261,7 +307,7 @@ function do_action($body) {
                 // After wait_for_silence, transfer to destination
                 // If silence detected = human, if timeout = machine (but we'll transfer anyway for simplicity)
                 $cmd = "bgapi sched_api +" . $sched_seconds . " " . $call_broadcast_uuid . " bgapi originate " .
-                       $origination_url . " " . $broadcast_destination_data . " XML " . $context;
+                       $origination_url . " " . $dial_target;
             } else {
                 // No AMD - direct transfer to destination
                 $origination_url = "{" . $channel_variables . "}loopback/" . $phone_number . "/" . $db_domain_name;
@@ -271,7 +317,7 @@ function do_action($body) {
 
                 // Schedule the call
                 $cmd = "bgapi sched_api +" . $sched_seconds . " " . $call_broadcast_uuid . " bgapi originate " .
-                       $origination_url . " " . $broadcast_destination_data . " XML " . $context;
+                       $origination_url . " " . $dial_target;
             }
 
             @event_socket::command($cmd);

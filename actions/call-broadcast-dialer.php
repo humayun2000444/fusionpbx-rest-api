@@ -224,6 +224,16 @@ function originate_call($fp, $lead, $broadcast, $domain_name, $database) {
     $destination = $broadcast['broadcast_destination_data'];
     $timeout = intval($broadcast['broadcast_timeout']) ?: 30;
     $avmd = $broadcast['broadcast_avmd'] === 'true';
+    $dest_type = isset($broadcast['broadcast_destination_type']) ? trim($broadcast['broadcast_destination_type']) : '';
+
+    // PLAYBACK destination - the answered party hears a recording rather than
+    // being connected to anyone, so $destination is a recording FILENAME.
+    $playback_file = '';
+    if ($dest_type === 'playback' && !empty($destination)) {
+        $settings = new settings(array("domain_uuid" => $domain_uuid));
+        $switch_recordings = $settings->get('switch', 'recordings', '/var/lib/freeswitch/recordings');
+        $playback_file = $switch_recordings.'/'.$domain_name.'/'.basename($destination);
+    }
 
     // Build channel variables - EXACT same format as working start.php (power mode)
     $vars = "^^:origination_uuid=$call_uuid";
@@ -241,9 +251,14 @@ function originate_call($fp, $lead, $broadcast, $domain_name, $database) {
     $vars .= ":domain_name=$domain_name";
     $vars .= ":accountcode='$accountcode'";
     $vars .= ":call_broadcast_uuid=$call_broadcast_uuid";
+    if ($playback_file !== '') {
+        $vars .= ":broadcast_audio_file='$playback_file'";
+    }
 
     if ($avmd) {
-        $vars .= ":amd_destination=$destination";
+        if ($playback_file === '') {
+            $vars .= ":amd_destination=$destination";
+        }
         $vars .= ":execute_on_answer='wait_for_silence 200 25 3 4000'";
     }
 
@@ -254,7 +269,12 @@ function originate_call($fp, $lead, $broadcast, $domain_name, $database) {
     );
 
     // Originate via loopback - EXACT same as working start.php
-    $cmd = "bgapi originate {" . $vars . "}loopback/$phone/$domain_name $destination XML $domain_name";
+    // ${broadcast_audio_file} is expanded by FreeSWITCH when playback runs, which
+    // keeps a filename containing spaces off the originate command line.
+    $dial_target = ($playback_file !== '')
+        ? '&playback(${broadcast_audio_file})'
+        : "$destination XML $domain_name";
+    $cmd = "bgapi originate {" . $vars . "}loopback/$phone/$domain_name " . $dial_target;
     fputs($fp, "$cmd\n\n");
     $response = esl_read_response($fp);
 
@@ -345,9 +365,17 @@ while ($running) {
         );
         $domain_name = $domain_row ? $domain_row['domain_name'] : 'default';
 
-        // 1. Get available agents in the destination queue
-        $queue_name = $destination; // e.g., "3000" (queue extension)
-        $agents = get_available_agents($fp, $queue_name, $domain_name);
+        // 1. Get available agents in the destination queue.
+        // A playback campaign connects nobody, so there are no agents to count -
+        // pace it by the concurrent limit alone, or it would never dial.
+        $is_playback = ($dest_type === 'playback');
+        if ($is_playback) {
+            $agents = array('available' => 0, 'on_call' => 0, 'total' => 0);
+        }
+        else {
+            $queue_name = $destination; // e.g., "3000" (queue extension)
+            $agents = get_available_agents($fp, $queue_name, $domain_name);
+        }
 
         // 2. Get current active calls for this broadcast
         $active_calls = get_active_calls($database, $uuid);
@@ -360,7 +388,7 @@ while ($running) {
         // Formula: target_calls = available_agents * dial_ratio
         // calls_to_make = target_calls - active_calls
         $available_agents = $agents['available'];
-        $target_calls = ceil($available_agents * $current_ratio);
+        $target_calls = $is_playback ? $concurrent_limit : ceil($available_agents * $current_ratio);
 
         // Cap at concurrent limit
         $target_calls = min($target_calls, $concurrent_limit);
