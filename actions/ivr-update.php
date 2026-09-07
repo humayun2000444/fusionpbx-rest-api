@@ -90,6 +90,7 @@ function do_action($body) {
     $ivr_menu_exit_data = isset($body->exit_data) ? $body->exit_data : $existing['ivr_menu_exit_data'];
     $ivr_menu_direct_dial = isset($body->direct_dial) ? $body->direct_dial : $existing['ivr_menu_direct_dial'];
     $ivr_menu_ringback = isset($body->ringback) ? $body->ringback : $existing['ivr_menu_ringback'];
+    $ivr_menu_ringback = ivr_resolve_ringback($database, $ivr_menu_ringback, $domain_uuid);
     $ivr_menu_cid_prefix = isset($body->cid_prefix) ? $body->cid_prefix : $existing['ivr_menu_cid_prefix'];
     $ivr_menu_context = $domain_name;
     $ivr_menu_enabled = isset($body->enabled) ? $body->enabled : $existing['ivr_menu_enabled'];
@@ -511,4 +512,61 @@ function get_ivr_setting($database, $subcategory, $default = null) {
     $parameters = array("subcategory" => $subcategory);
     $result = $database->select($sql, $parameters, "column");
     return $result !== null ? $result : $default;
+}
+
+/**
+ * Resolve a ringback value the portal can actually produce.
+ *
+ * The switch needs an absolute path, but a browser cannot build one: the
+ * recordings directory is a server-side setting. The portal therefore sends
+ * "recording:<uuid>", resolved here against THIS domain's recordings - the same
+ * contract extension-update.php uses for hold music, and the same directory the
+ * FusionPBX GUI reads, so both interfaces produce identical values.
+ *
+ * A bare filename is accepted too, since that is what the greeting fields store
+ * and it is an easy thing to send by mistake.
+ *
+ * Anything else - local_stream://, ${us-ring}, an absolute path - is returned
+ * untouched.
+ */
+function ivr_resolve_ringback($database, $value, $domain_uuid) {
+    $value = is_string($value) ? trim($value) : '';
+    if ($value === '') { return $value; }
+    if (strpos($value, '://') !== false || strpos($value, '$') === 0) { return $value; }
+
+    $filename = null;
+    if (preg_match('/^recording:([0-9a-fA-F-]{36})$/', $value, $m)) {
+        $rec = $database->select(
+            "SELECT recording_filename FROM v_recordings "
+            ."WHERE recording_uuid = :recording_uuid AND domain_uuid = :domain_uuid",
+            array("recording_uuid" => $m[1], "domain_uuid" => $domain_uuid), "row"
+        );
+        if (empty($rec['recording_filename'])) { return ''; }
+        $filename = $rec['recording_filename'];
+    }
+    elseif (strpos($value, '/') === false) {
+        $filename = $value;
+    }
+    else {
+        return $value;
+    }
+
+    $dir_row = $database->select(
+        "SELECT default_setting_value FROM v_default_settings "
+        ."WHERE default_setting_category = 'switch' "
+        ."AND default_setting_subcategory = 'recordings' "
+        ."AND default_setting_enabled = 'true' LIMIT 1",
+        array(), "row"
+    );
+    $rec_dir = !empty($dir_row['default_setting_value'])
+        ? rtrim($dir_row['default_setting_value'], '/')
+        : '/var/lib/freeswitch/recordings';
+
+    $dom = $database->select(
+        "SELECT domain_name FROM v_domains WHERE domain_uuid = :domain_uuid",
+        array("domain_uuid" => $domain_uuid), "row"
+    );
+    if (empty($dom['domain_name'])) { return ''; }
+
+    return $rec_dir.'/'.$dom['domain_name'].'/'.basename($filename);
 }
