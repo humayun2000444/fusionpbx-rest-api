@@ -89,10 +89,29 @@ function do_action($body) {
             // Check both chains: sip-auth-ip and sip-auth-fail
             $chains = ['sip-auth-ip', 'sip-auth-fail'];
             foreach ($chains as $chain) {
-                $command = $firewall_path . '/iptables -L ' . escapeshellarg($chain) . ' -n --line-numbers 2>/dev/null | grep "' . $ip_address . ' " | cut -d " " -f1';
-                $line_number = trim(shell_exec($command));
-                if (is_numeric($line_number)) {
-                    shell_exec($firewall_path . '/iptables -D ' . escapeshellarg($chain) . ' ' . $line_number . ' 2>/dev/null');
+                // Delete by rule spec, in a loop, rather than by line number.
+                //
+                // Two ways the line-number lookup silently did nothing while
+                // the log was still marked unblocked, leaving the caller
+                // firewalled and unable to register:
+                //
+                //   1. an address usually has MORE THAN ONE rule - event_guard
+                //      blocks on every failed auth - so the grep returned
+                //      several lines, is_numeric() was false, and nothing was
+                //      deleted at all. Seen live with 12 duplicates on one IP.
+                //   2. blocks are inserted with -I, at position 1, renumbering
+                //      everything below, so a number read a moment earlier can
+                //      delete a different address's rule.
+                //
+                // -C reports when there is nothing left to remove.
+                $spec = ' ' . escapeshellarg($chain) . ' -s ' . escapeshellarg($ip_address) . ' -j DROP';
+                for ($i = 0; $i < 50; $i++) {
+                    $out = array(); $present = 1;
+                    exec($firewall_path . '/iptables -C' . $spec . ' 2>/dev/null', $out, $present);
+                    if ($present !== 0) { break; }
+                    $out = array(); $rc = 1;
+                    exec($firewall_path . '/iptables -D' . $spec . ' 2>/dev/null', $out, $rc);
+                    if ($rc !== 0) { break; }
                     $firewall_removed = true;
                 }
             }
