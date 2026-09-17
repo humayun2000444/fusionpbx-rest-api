@@ -251,6 +251,13 @@ function originate_call($fp, $lead, $broadcast, $domain_name, $database) {
     $vars .= ":domain_name=$domain_name";
     $vars .= ":accountcode='$accountcode'";
     $vars .= ":call_broadcast_uuid=$call_broadcast_uuid";
+
+    //an outbound route may gate on ${toll_allow}; a loopback leg has no user
+    //and so no directory variables, and would match no route at all.
+    $toll_allow = isset($broadcast['broadcast_toll_allow'])
+        ? trim((string) $broadcast['broadcast_toll_allow']) : '';
+    if ($toll_allow === '') { $toll_allow = broadcast_default_toll_allow($database); }
+    if ($toll_allow !== '') { $vars .= ":toll_allow='$toll_allow'"; }
     if ($playback_file !== '') {
         $vars .= ":broadcast_audio_file='$playback_file'";
     }
@@ -548,4 +555,38 @@ function sync_cdr_for_predictive($database, $broadcasts) {
             );
         }
     }
+}
+
+/**
+ * What a broadcast call should present as its dialling permission.
+ *
+ * An outbound route may gate on ${toll_allow} - every BTCL domain does:
+ *
+ *     <condition field="${toll_allow}" expression="domestic"/>
+ *
+ * A registered phone passes that because FreeSWITCH stamps the extension's
+ * directory variables onto its channel. The dialler originates a LOOPBACK, so
+ * there is no user, no directory lookup and no toll_allow at all - and the call
+ * then matches no outbound route, dying with 0s PDD and "No Answer" before an
+ * INVITE is ever sent. FusionPBX's own toll_allow_refresh cannot rescue it
+ * either: that looks the value up by CALLER extension, and the dialler sets the
+ * caller id to the DESTINATION number so the queue shows who is being called.
+ *
+ * Campaign value wins; otherwise the `call_broadcast.default_toll_allow`
+ * setting, otherwise 'domestic'. Deliberately not the full
+ * local:domestic:international - a campaign is authorised by whoever created
+ * it, but it should not silently acquire international dialling.
+ *
+ * Inert where no route reads the variable, which is the case on CCL.
+ */
+function broadcast_default_toll_allow($database) {
+    $row = $database->select(
+        "SELECT default_setting_value FROM v_default_settings "
+        ."WHERE default_setting_category = 'call_broadcast' "
+        ."AND default_setting_subcategory = 'default_toll_allow' "
+        ."AND default_setting_enabled = 'true' LIMIT 1",
+        array(), "row"
+    );
+    $value = !empty($row['default_setting_value']) ? trim($row['default_setting_value']) : '';
+    return $value !== '' ? $value : 'domestic';
 }

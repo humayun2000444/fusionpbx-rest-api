@@ -52,6 +52,11 @@ function do_action($body) {
 
     $broadcast_accountcode = isset($body->broadcastAccountcode) ? $body->broadcastAccountcode :
                             (isset($body->broadcast_accountcode) ? $body->broadcast_accountcode : $domain_name);
+    //Dialling permission asserted on the call. Left empty the dialler falls
+    //back to call_broadcast.default_toll_allow, because an outbound route may
+    //gate on ${toll_allow} and a loopback leg carries none of its own.
+    $broadcast_toll_allow = isset($body->broadcastTollAllow) ? $body->broadcastTollAllow :
+                            (isset($body->broadcast_toll_allow) ? $body->broadcast_toll_allow : '');
 
     // Schedule parameters
     $schedule_enabled = isset($body->scheduleEnabled) ? ($body->scheduleEnabled === true || $body->scheduleEnabled === 'true') :
@@ -156,6 +161,7 @@ function do_action($body) {
         "broadcast_destination_data" => $broadcast_destination_data,
         "broadcast_phone_numbers" => $broadcast_phone_numbers,
         "broadcast_accountcode" => $broadcast_accountcode,
+        "broadcast_toll_allow" => $broadcast_toll_allow,
         "broadcast_schedule_date" => $schedule_date,
         "broadcast_schedule_time" => $schedule_time,
         "broadcast_schedule_days" => $schedule_days,

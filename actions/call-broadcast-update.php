@@ -72,6 +72,8 @@ function do_action($body) {
         "broadcast_avmd" => "broadcast_avmd",
         "broadcastAccountcode" => "broadcast_accountcode",
         "broadcast_accountcode" => "broadcast_accountcode",
+        "broadcastTollAllow" => "broadcast_toll_allow",
+        "broadcast_toll_allow" => "broadcast_toll_allow",
         // Schedule fields
         "scheduleEnabled" => "broadcast_schedule_enabled",
         "schedule_enabled" => "broadcast_schedule_enabled",
