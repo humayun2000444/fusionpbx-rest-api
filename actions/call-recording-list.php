@@ -2,6 +2,27 @@
 
 $required_params = array();
 
+if (!function_exists('rec_cursor_encode')) {
+    /**
+     * Keyset pagination, for the same reason cdr-list has it: this view sits on
+     * v_xml_cdr, which takes ~500,000 rows a day. Paging a moving, time-ordered
+     * table with LIMIT/OFFSET silently skips rows an exporter has never seen.
+     * The cursor anchors to the last row returned - (call_recording_date,
+     * call_recording_uuid) - so inserts cannot disturb it and a failed run
+     * resumes exactly where it stopped.
+     */
+    function rec_cursor_encode($date, $uuid) {
+        return rtrim(strtr(base64_encode($date . '|' . $uuid), '+/', '-_'), '=');
+    }
+    function rec_cursor_decode($cursor) {
+        $raw = base64_decode(strtr($cursor, '-_', '+/'), false);
+        if ($raw === false || strpos($raw, '|') === false) { return null; }
+        list($date, $uuid) = explode('|', $raw, 2);
+        if (!preg_match('/^[0-9a-fA-F-]{36}$/', $uuid)) { return null; }
+        return array('date' => $date, 'uuid' => $uuid);
+    }
+}
+
 function do_action($body) {
     global $domain_uuid;
 
@@ -118,8 +139,35 @@ function do_action($body) {
         $parameters["search"] = "%" . strtolower($cr_search) . "%";
     }
 
-    // Order by date descending (most recent first)
-    $sql .= "ORDER BY call_recording_date DESC ";
+    // Export mode is opt-in: `cursor` or `order` switches to keyset paging.
+    // Callers passing neither keep the exact behaviour they always had.
+    $cr_export_mode = isset($body->cursor) || isset($body->order);
+    $cr_asc = isset($body->order) && strtolower(trim((string) $body->order)) === 'asc';
+
+    if (!empty($body->unexported_only)) {
+        $sql .= "AND exported_at IS NULL ";
+    }
+
+    if ($cr_export_mode && !empty($body->cursor)) {
+        $cr_cur = rec_cursor_decode((string) $body->cursor);
+        if ($cr_cur === null) {
+            return array("success" => false, "error" => "invalid cursor");
+        }
+        $sql .= "AND (call_recording_date, call_recording_uuid) "
+              . ($cr_asc ? '>' : '<')
+              . " (:cursor_date::timestamptz, :cursor_uuid::uuid) ";
+        $parameters["cursor_date"] = $cr_cur['date'];
+        $parameters["cursor_uuid"] = $cr_cur['uuid'];
+    }
+
+    if ($cr_export_mode) {
+        $cr_dir = $cr_asc ? 'ASC' : 'DESC';
+        $sql .= "ORDER BY call_recording_date " . $cr_dir . ", call_recording_uuid " . $cr_dir . " ";
+    }
+    else {
+        // Order by date descending (most recent first)
+        $sql .= "ORDER BY call_recording_date DESC ";
+    }
 
     // Pagination
     $limit = isset($body->limit) ? (int)$body->limit : 50;
@@ -141,7 +189,11 @@ function do_action($body) {
         $recordings = array();
     }
 
-    // Get total count for pagination
+    // Get total count for pagination.
+    // Skipped in export mode: COUNT(*) over this view scans the whole CDR table
+    // (1.85M rows on the larger cluster) and a keyset pager never uses a total.
+    $total_count = 0;
+    if (!$cr_export_mode) {
     $count_sql = "SELECT COUNT(*) as total FROM view_call_recordings WHERE 1=1 ";
     $count_params = array();
 
@@ -203,6 +255,43 @@ function do_action($body) {
     $database = new database;
     $count_result = $database->select($count_sql, $count_params, "row");
     $total_count = $count_result ? (int)$count_result["total"] : 0;
+    }
+
+    // The recording list carries extension_uuid but not the extension NUMBER,
+    // which is what a human needs in a filename. Resolve the uuids of this page
+    // in one query rather than joining: every filter above uses bare column
+    // names, so a joined table would make domain_uuid and extension_uuid
+    // ambiguous and break searches that work today.
+    $extension_numbers = array();
+    $uuids_to_resolve = array();
+    foreach ($recordings as $rec) {
+        $eu = isset($rec["extension_uuid"]) ? trim((string) $rec["extension_uuid"]) : '';
+        if ($eu !== '' && preg_match('/^[0-9a-fA-F-]{36}$/', $eu)) {
+            $uuids_to_resolve[$eu] = true;
+        }
+    }
+    if (!empty($uuids_to_resolve)) {
+        $ph = array();
+        $ext_params = array();
+        foreach (array_keys($uuids_to_resolve) as $i => $eu) {
+            $ph[] = ":eu" . $i;
+            $ext_params["eu" . $i] = $eu;
+        }
+        $ext_rows = $database->select(
+            "SELECT extension_uuid, extension, number_alias FROM v_extensions "
+            . "WHERE extension_uuid IN (" . implode(", ", $ph) . ")",
+            $ext_params, "all"
+        );
+        if (is_array($ext_rows)) {
+            foreach ($ext_rows as $er) {
+                // number_alias is what the outside world dials when it is set;
+                // the extension is the internal number. Prefer the extension.
+                $extension_numbers[$er["extension_uuid"]] =
+                    $er["extension"] !== '' && $er["extension"] !== null
+                        ? $er["extension"] : $er["number_alias"];
+            }
+        }
+    }
 
     // Format the results
     $result = array();
@@ -219,8 +308,19 @@ function do_action($body) {
             "callRecordingTranscription" => $rec["call_recording_transcription"],
             "callRecordingLength" => $rec["call_recording_length"],
             "callRecordingDate" => $rec["call_recording_date"],
-            "callDirection" => $rec["call_direction"]
+            "callDirection" => $rec["call_direction"],
+            "extensionUuid" => $rec["extension_uuid"],
+            "extension" => isset($extension_numbers[$rec["extension_uuid"]])
+                ? $extension_numbers[$rec["extension_uuid"]] : null,
+            "exportedAt" => isset($rec["exported_at"]) ? $rec["exported_at"] : null
         );
+    }
+
+    // Only offer a cursor when the page was full; a short page is the end.
+    $next_cursor = null;
+    if ($cr_export_mode && count($recordings) === $limit) {
+        $last = $recordings[count($recordings) - 1];
+        $next_cursor = rec_cursor_encode($last["call_recording_date"], $last["call_recording_uuid"]);
     }
 
     return array(
@@ -229,6 +329,7 @@ function do_action($body) {
         "count" => count($result),
         "totalCount" => $total_count,
         "limit" => $limit,
-        "offset" => $offset
+        "offset" => $offset,
+        "nextCursor" => $next_cursor
     );
 }

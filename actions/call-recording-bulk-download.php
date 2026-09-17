@@ -12,6 +12,10 @@ function do_action($body) {
         return array("error" => "call_recording_uuids must be a non-empty array");
     }
 
+    // Hashing re-reads every byte - a 500 MB batch means 500 MB of extra I/O -
+    // so it is opt-in, same contract as call-recording-bulk-info.
+    $want_checksums = !empty($body->include_checksum);
+
     // Get recordings info from database
     $database = new database;
     $recordings = array();
@@ -19,7 +23,9 @@ function do_action($body) {
 
     foreach ($uuids as $uuid) {
         $sql = "SELECT
-                    call_recording_uuid, call_recording_path, call_recording_name
+                    call_recording_uuid, call_recording_path, call_recording_name,
+                    caller_id_number, destination_number, call_recording_date,
+                    call_direction, call_recording_length
                 FROM view_call_recordings
                 WHERE call_recording_uuid = :uuid";
 
@@ -30,7 +36,11 @@ function do_action($body) {
             $sql2 = "SELECT
                         xml_cdr_uuid as call_recording_uuid,
                         record_path as call_recording_path,
-                        record_name as call_recording_name
+                        record_name as call_recording_name,
+                        caller_id_number, destination_number,
+                        start_stamp as call_recording_date,
+                        direction as call_direction,
+                        duration as call_recording_length
                     FROM v_xml_cdr
                     WHERE xml_cdr_uuid = :uuid
                     AND record_name IS NOT NULL AND record_name != ''";
@@ -45,7 +55,12 @@ function do_action($body) {
                     "uuid" => $record["call_recording_uuid"],
                     "path" => $full_path,
                     "name" => $record["call_recording_name"],
-                    "size" => $file_size
+                    "size" => $file_size,
+                    "caller" => isset($record["caller_id_number"]) ? $record["caller_id_number"] : null,
+                    "destination" => isset($record["destination_number"]) ? $record["destination_number"] : null,
+                    "date" => isset($record["call_recording_date"]) ? $record["call_recording_date"] : null,
+                    "direction" => isset($record["call_direction"]) ? $record["call_direction"] : null,
+                    "seconds" => isset($record["call_recording_length"]) ? $record["call_recording_length"] : null
                 );
                 $total_size += $file_size;
             }
@@ -99,6 +114,37 @@ function do_action($body) {
         foreach ($batch as $recording) {
             $file_args .= " " . escapeshellarg($recording["path"]);
         }
+
+        // A manifest travels with every archive. Two reasons it matters:
+        //  - the files are named after a uuid, which says nothing about the
+        //    call once the zip is sitting in someone's archive. The manifest is
+        //    what makes 3f2a....mp3 mean "01712345678 called extension 1001 at
+        //    18:37 on 17 Sep".
+        //  - with include_checksum, the receiver can PROVE the transfer was
+        //    complete before anything is marked exported or deleted.
+        $manifest = array(
+            "generated_at" => date('c'),
+            "part"         => $index + 1,
+            "parts"        => count($batches),
+            "count"        => count($batch),
+            "recordings"   => array(),
+        );
+        foreach ($batch as $recording) {
+            $manifest["recordings"][] = array(
+                "file"        => basename($recording["path"]),
+                "uuid"        => $recording["uuid"],
+                "caller"      => $recording["caller"],
+                "destination" => $recording["destination"],
+                "direction"   => $recording["direction"],
+                "date"        => $recording["date"],
+                "seconds"     => $recording["seconds"],
+                "size"        => $recording["size"],
+                "sha256"      => $want_checksums ? hash_file('sha256', $recording["path"]) : null,
+            );
+        }
+        $manifest_path = $temp_dir . "/manifest.json";
+        file_put_contents($manifest_path, json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+        $file_args .= " " . escapeshellarg($manifest_path);
 
         // Create zip using command line (more portable than ZipArchive)
         $cmd = "cd " . escapeshellarg($temp_dir) . " && zip -j " . escapeshellarg(basename($zip_path)) . $file_args . " 2>&1";

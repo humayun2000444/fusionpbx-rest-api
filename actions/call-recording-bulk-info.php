@@ -8,6 +8,9 @@
 $required_params = array();
 
 function do_action($body) {
+    // Checksums are what let retention be safe: the puller can verify what it
+    // received matches what the server holds, and only then mark it exported.
+    $bulk_checksums = !empty($body->include_checksum);
     global $domain_uuid;
 
     $database = new database;
@@ -80,6 +83,11 @@ function do_action($body) {
                         "path" => $full_path,
                         "name" => $row["call_recording_name"],
                         "size" => filesize($full_path),
+                        // Opt-in: the archiver needs a checksum to PROVE a
+                        // transfer was complete before anything is deleted, but
+                        // hashing is real I/O - a 500 MB batch means reading
+                        // 500 MB - so it is never done unless asked for.
+                        "sha256" => $bulk_checksums ? hash_file('sha256', $full_path) : null,
                         "date" => $row["start_stamp"],
                         "caller" => $row["caller_id_number"],
                         "destination" => $row["destination_number"],
