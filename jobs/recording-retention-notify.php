@@ -73,6 +73,13 @@ function rn_size($bytes) {
     return number_format($b / 1048576, 0) . ' MB';
 }
 
+/**
+ * "1 recording" / "2 recordings". A customer with a single recording at risk
+ * got "1 call recordings to download", which reads as carelessness in a mail
+ * whose whole purpose is to be taken seriously.
+ */
+function rn_plural($n, $one, $many) { return ((int) $n === 1) ? $one : $many; }
+
 /** One row of the summary table. $strong paints the number red. */
 function rn_row($label, $value, $strong = false, $last = false) {
     $border = $last ? '' : 'border-bottom:1px solid #eef1f4;';
@@ -255,15 +262,19 @@ foreach ($rows as $r) {
     // The subject must not promise a removal the body then says is not happening.
     $at_risk_subj = (int) $r['at_risk_count'];
     if ($pending > 0 && $milestone <= 3) {
-        $subject = "Action needed: $count call recordings will be removed on $removal";
+        $subject = "Action needed: $count call " . rn_plural($pending, 'recording', 'recordings')
+                 . " will be removed on $removal";
     } else if ($pending > 0) {
-        $subject = "$count call recordings to download before $removal";
+        $subject = "$count call " . rn_plural($pending, 'recording', 'recordings')
+                 . " to download before $removal";
     } else {
-        $subject = "Your call recordings — $total on file";
+        $subject = "Your call " . rn_plural((int) $r['total_count'], 'recording', 'recordings')
+                 . " — $total on file";
     }
 
     $body  = "Dear customer,\n\n";
-    $body .= "Your Cloud PBX currently holds $total call recordings for "
+    $body .= "Your Cloud PBX currently holds $total call "
+           . rn_plural((int) $r['total_count'], 'recording', 'recordings') . " for "
            . $r['domain_name'] . ".\n\n";
     // Only announce a removal when something is actually old enough to be
     // removed. Saying "scheduled for removal on <date>" when nothing qualifies
@@ -309,28 +320,33 @@ foreach ($rows as $r) {
     $tpl = is_readable(MAIL_TEMPLATE) ? file_get_contents(MAIL_TEMPLATE) : false;
     if ($tpl !== false) {
         if ($pending > 0) {
-            $preheader = "$count recordings have not been downloaded yet. "
+            $preheader = "$count " . rn_plural($pending, 'recording', 'recordings')
+                       . " have not been downloaded yet. "
                        . "They are removed on " . rn_date($r['purge_date']) . ".";
             $alert = '<tr><td style="padding:0 28px;"><div style="margin-top:20px;background:#fef3f2;'
                    . 'border:1px solid #fecdca;border-left:4px solid #d92d20;border-radius:6px;padding:14px 16px;">'
                    . '<div style="color:#b42318;font-size:13px;font-weight:700;letter-spacing:.4px;'
                    . 'text-transform:uppercase;">Action needed</div>'
                    . '<div style="color:#7a271a;font-size:14px;line-height:1.6;padding-top:5px;">'
-                   . '<strong>' . $count . ' recordings (' . rn_size($r['pending_bytes']) . ')</strong>'
+                   . '<strong>' . $count . ' ' . rn_plural($pending, 'recording', 'recordings')
+                   . ' (' . rn_size($r['pending_bytes']) . ')</strong>'
                    . ' have not been downloaded yet. They will be removed on <strong>'
                    . rn_date($r['purge_date']) . '</strong>.</div></div></td></tr>';
         } else {
-            $preheader = "$total call recordings on file. Nothing is due for removal.";
+            $preheader = "$total call " . rn_plural((int) $r['total_count'], 'recording', 'recordings')
+                       . " on file. Nothing is due for removal.";
             $alert = '';
         }
 
         if ($at_risk > 0) {
-            $intro = 'Your Cloud PBX currently holds <strong>' . $total . ' call recordings</strong>.<br><br>'
+            $intro = 'Your Cloud PBX currently holds <strong>' . $total . ' call '
+                   . rn_plural((int) $r['total_count'], 'recording', 'recordings') . '</strong>.<br><br>'
                    . 'Recordings are kept for at least <strong>' . $display_days . ' days</strong>. '
                    . 'Those made before <strong>' . rn_date($r['cutoff_date']) . '</strong> are scheduled '
                    . 'for removal on <strong>' . rn_date($r['purge_date']) . '</strong>.';
         } else {
-            $intro = 'Your Cloud PBX currently holds <strong>' . $total . ' call recordings</strong>.<br><br>'
+            $intro = 'Your Cloud PBX currently holds <strong>' . $total . ' call '
+                   . rn_plural((int) $r['total_count'], 'recording', 'recordings') . '</strong>.<br><br>'
                    . 'Recordings are kept for at least <strong>' . $display_days . ' days</strong>. '
                    . 'Nothing is due for removal yet &mdash; your oldest recordings are still well '
                    . 'inside that window.';
