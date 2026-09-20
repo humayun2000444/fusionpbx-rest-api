@@ -25,11 +25,37 @@ define('PARTNERS_ENDPOINT', RTC_BASE . '/partner/get-partners');
 // out of the domain name, which silently fails for every domain not shaped
 // like "pbx-something-349.".
 define('PARTNER_BY_DOMAIN_ENDPOINT', RTC_BASE . '/partner/partner-by-pbx-uuid');
+// Primary source: route.RouteName is the domain name and route.idPartner its
+// owner, one-to-one, and the partner's own address is a contact address rather
+// than a login.
+define('DOMAIN_MAP_ENDPOINT', RTC_BASE . '/partner/domain-partner-map');
 define('PORTAL_URL', rtrim(getenv('PORTAL_URL') ?: 'https://ippbx.alaapcloud.gov.bd:5174', '/'));
 // Empty means skip the bell. Correct anywhere the endpoint does not exist,
 // such as a platform still running an older TelcoREST.
 define('SERVICE_KEY', getenv('SYSTEM_ACCESS_KEY') ?: '');
 define('MAIL_TEMPLATE', __DIR__ . '/templates/sftp-ready.html');
+
+/**
+ * Keep only the addresses that are actually addresses.
+ *
+ * Every source here is free text somebody typed: auth_user.email holds
+ * "admintelco.com" for at least one partner, with no @ at all. Accepting that
+ * sends the mail nowhere, and silently -- the send returns 200 because the
+ * gateway queues it. Better to reject it and fall through to a source that can
+ * receive.
+ *
+ * Handles the comma-separated lists the fallback setting uses, and returns the
+ * valid ones joined, or '' if none survive.
+ */
+function rn_valid_emails($raw) {
+    if ($raw === null) { return ''; }
+    $ok = array();
+    foreach (explode(',', (string) $raw) as $part) {
+        $e = trim($part);
+        if ($e !== '' && filter_var($e, FILTER_VALIDATE_EMAIL)) { $ok[] = $e; }
+    }
+    return implode(', ', $ok);
+}
 
 $dry_run = in_array('--dry-run', $argv);
 $arg = null;
@@ -57,11 +83,30 @@ if (empty($sftp['enabled']) || empty($sftp['username']) || empty($sftp['host']))
     exit(0);
 }
 
-// 1. Ask who owns this domain. This is the authoritative answer -- auth_user
-//    maps pbx_uuid to partner_id and carries the address -- so it is tried
-//    first and nothing below runs if it succeeds.
+// 1. route -> partner -> email. Unambiguous: no route name maps to two
+//    partners, and the address is the partner's own rather than a user login.
 $to = '';
-$ch = curl_init(PARTNER_BY_DOMAIN_ENDPOINT);
+$ch = curl_init(DOMAIN_MAP_ENDPOINT);
+curl_setopt_array($ch, array(
+    CURLOPT_POST => true,
+    CURLOPT_POSTFIELDS => '{}',
+    CURLOPT_HTTPHEADER => array('Content-Type: application/json',
+                                'system-access-key: ' . SERVICE_KEY),
+    CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_TIMEOUT => 30));
+$map_raw  = curl_exec($ch);
+$map_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+if ($map_code === 200) {
+    $m = json_decode((string) $map_raw, true);
+    $k = strtolower($domain['domain_name']);
+    if (is_array($m) && isset($m[$k]['email'])) { $to = rn_valid_emails($m[$k]['email']); }
+} else {
+    fwrite(STDERR, "domain-partner map lookup: HTTP $map_code (falling back)\n");
+}
+
+// 2. auth_user, for a domain with no route entry.
+$ch = $to !== '' ? null : curl_init(PARTNER_BY_DOMAIN_ENDPOINT);
+if ($ch !== null) {
 curl_setopt_array($ch, array(
     CURLOPT_POST => true,
     CURLOPT_POSTFIELDS => json_encode(array('pbxUuid' => $domain['domain_uuid'])),
@@ -74,9 +119,16 @@ curl_setopt_array($ch, array(
 $owner_raw  = curl_exec($ch);
 $owner_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
+} else { $owner_code = 0; $owner_raw = ''; }
 if ($owner_code === 200) {
     $owner = json_decode((string) $owner_raw, true);
-    if (is_array($owner) && !empty($owner['email'])) { $to = trim($owner['email']); }
+    if (is_array($owner) && !empty($owner['email'])) {
+        $to = rn_valid_emails($owner['email']);
+        if ($to === '') {
+            fwrite(STDERR, sprintf("owner of %s has an unusable address (%s) - trying the next source\n",
+                $domain['domain_name'], $owner['email']));
+        }
+    }
 } else if ($owner_code !== 404) {
     // 404 is a real answer: nobody owns this domain. Anything else means the
     // lookup itself is broken, which is worth seeing in the log.
@@ -100,10 +152,10 @@ if ($to === '' && is_array($partners) && preg_match('/-(\d+)\./', $domain['domai
     foreach ((array) $list as $p) {
         if (!is_array($p)) { continue; }
         $id = isset($p['idPartner']) ? (int) $p['idPartner'] : (isset($p['id']) ? (int) $p['id'] : 0);
-        if ($id === $want && !empty($p['email'])) { $to = trim($p['email']); break; }
+        if ($id === $want && !empty($p['email'])) { $to = rn_valid_emails($p['email']); if ($to !== '') { break; } }
     }
 }
-if ($to === '' && !empty($sftp['notify_email'])) { $to = trim($sftp['notify_email']); }
+if ($to === '' && !empty($sftp['notify_email'])) { $to = rn_valid_emails($sftp['notify_email']); }
 
 // Global fallback, e.g. the NOC. Same setting the retention notice reads, so
 // both jobs address a given domain the same way.
@@ -117,7 +169,7 @@ if ($to === '') {
         "SELECT default_setting_value FROM v_default_settings
           WHERE default_setting_category='recordings' AND default_setting_subcategory='notify_email'
             AND default_setting_enabled=true LIMIT 1", array(), 'row');
-    if (!empty($row['default_setting_value'])) { $to = trim($row['default_setting_value']); }
+    if (!empty($row['default_setting_value'])) { $to = rn_valid_emails($row['default_setting_value']); }
 }
 
 if ($to === '') {

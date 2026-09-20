@@ -46,6 +46,10 @@ define('PARTNERS_ENDPOINT', RTC_BASE . '/partner/get-partners');
 // auth_user holds pbx_uuid alongside partner_id; nothing else does. Asking it
 // beats parsing the partner id out of the domain name.
 define('PARTNER_BY_DOMAIN_ENDPOINT', RTC_BASE . '/partner/partner-by-pbx-uuid');
+// The whole domain -> partner map in one call, built from route.RouteName.
+// This is the primary source: route names ARE domain names, no RouteName maps
+// to two partners, and every domain it covers reaches a real address.
+define('DOMAIN_MAP_ENDPOINT', RTC_BASE . '/partner/domain-partner-map');
 define('NOTIFY_ENDPOINT',   RTC_BASE . '/api/v1/notifications/create');
 // Internal-only endpoint; the shared service key is the gate. Read from the
 // environment so the key is not duplicated into this file. Empty means the bell
@@ -138,8 +142,60 @@ if (!empty($row_dd['default_setting_value'])) { $display_days = (int) $row_dd['d
  * domains on BTCL. The remaining 15 fall back to the configured address and are
  * NAMED in the output, so the gap is visible rather than a silent no-op.
  */
+/**
+ * Keep only the addresses that are actually addresses. auth_user.email holds
+ * "admintelco.com" for at least one partner -- no @ -- and accepting it sends
+ * the notice nowhere while still returning 200 from the gateway queue.
+ */
+function rn_valid_emails($raw) {
+    if ($raw === null) { return ''; }
+    $ok = array();
+    foreach (explode(',', (string) $raw) as $part) {
+        $e = trim($part);
+        if ($e !== '' && filter_var($e, FILTER_VALIDATE_EMAIL)) { $ok[] = $e; }
+    }
+    return implode(', ', $ok);
+}
+
 function rtc_partner_emails($domains) {
     $by_domain = array();
+
+    // 1. route -> partner -> email, the whole table in one call.
+    //
+    // Preferred over auth_user because it is unambiguous. A domain can have
+    // several auth_user rows across several partners -- samsung has three,
+    // spanning the platform admin and the actual tenant -- and auth_user.email
+    // is a login, holding values like "admintelco.com" with no @ in it. Route
+    // names map one-to-one to a partner, and that partner's own address is a
+    // contact address.
+    $ch = curl_init(DOMAIN_MAP_ENDPOINT);
+    curl_setopt_array($ch, array(
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => '{}',
+        CURLOPT_HTTPHEADER => array('Content-Type: application/json',
+                                    'system-access-key: ' . SERVICE_KEY),
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_TIMEOUT => 30));
+    $map_raw  = curl_exec($ch);
+    $map_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    $by_name = array();
+    if ($map_code === 200) {
+        $m = json_decode((string) $map_raw, true);
+        if (is_array($m)) {
+            foreach ($m as $dname => $info) {
+                if (!is_array($info) || empty($info['email'])) { continue; }
+                $valid = rn_valid_emails($info['email']);
+                if ($valid !== '') { $by_name[strtolower($dname)] = $valid; }
+            }
+        }
+    } else {
+        fwrite(STDERR, "domain-partner map lookup: HTTP $map_code (falling back)\n");
+    }
+    foreach ($domains as $d) {
+        $k = strtolower($d['domain_name']);
+        if (isset($by_name[$k])) { $by_domain[strtolower($d['domain_uuid'])] = $by_name[$k]; }
+    }
 
     $ch = curl_init(PARTNERS_ENDPOINT);
     curl_setopt_array($ch, array(
@@ -164,7 +220,8 @@ function rtc_partner_emails($domains) {
     $email_by_id = array();
     foreach ($partners as $p) {
         if (!empty($p['idPartner']) && !empty($p['email'])) {
-            $email_by_id[(int) $p['idPartner']] = trim($p['email']);
+            $valid = rn_valid_emails($p['email']);
+            if ($valid !== '') { $email_by_id[(int) $p['idPartner']] = $valid; }
         }
     }
 
@@ -176,6 +233,8 @@ function rtc_partner_emails($domains) {
     // pbx-manager) carry no partner id in their name, matched nothing, and so
     // had their notices sent to a catch-all address instead of their partner.
     foreach ($domains as $d) {
+        // Already answered by the route map above.
+        if (isset($by_domain[strtolower($d['domain_uuid'])])) { continue; }
         $ch = curl_init(PARTNER_BY_DOMAIN_ENDPOINT);
         curl_setopt_array($ch, array(
             CURLOPT_POST => true,
@@ -190,8 +249,13 @@ function rtc_partner_emails($domains) {
         if ($code2 === 200) {
             $owner = json_decode((string) $raw2, true);
             if (is_array($owner) && !empty($owner['email'])) {
-                $by_domain[strtolower($d['domain_uuid'])] = trim($owner['email']);
-                continue;
+                $valid = rn_valid_emails($owner['email']);
+                if ($valid !== '') {
+                    $by_domain[strtolower($d['domain_uuid'])] = $valid;
+                    continue;
+                }
+                fwrite(STDERR, sprintf("owner of %s has an unusable address (%s)\n",
+                    $d['domain_name'], $owner['email']));
             }
             // Owned, but that user has no address -- the partner list may still
             // have one against the same id.
