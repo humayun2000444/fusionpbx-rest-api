@@ -20,6 +20,11 @@ define('RTC_BASE', getenv('RTC_BASE_URL') ?: 'https://vbs.alaapcloud.gov.bd:4000
 define('EMAIL_ENDPOINT',    RTC_BASE . '/api/v1/email/send');
 define('NOTIFY_ENDPOINT',   RTC_BASE . '/api/v1/notifications/create');
 define('PARTNERS_ENDPOINT', RTC_BASE . '/partner/get-partners');
+// auth_user is the only place holding both pbx_uuid and partner_id, and it
+// lives in MySQL behind RTC. Asking it directly beats parsing the partner id
+// out of the domain name, which silently fails for every domain not shaped
+// like "pbx-something-349.".
+define('PARTNER_BY_DOMAIN_ENDPOINT', RTC_BASE . '/partner/partner-by-pbx-uuid');
 define('PORTAL_URL', rtrim(getenv('PORTAL_URL') ?: 'https://ippbx.alaapcloud.gov.bd:5174', '/'));
 // Empty means skip the bell. Correct anywhere the endpoint does not exist,
 // such as a platform still running an older TelcoREST.
@@ -52,16 +57,44 @@ if (empty($sftp['enabled']) || empty($sftp['username']) || empty($sftp['host']))
     exit(0);
 }
 
-// Partner address first, then a per-domain override. Same order as the
-// retention notice, so a customer hears from one place.
+// 1. Ask who owns this domain. This is the authoritative answer -- auth_user
+//    maps pbx_uuid to partner_id and carries the address -- so it is tried
+//    first and nothing below runs if it succeeds.
 $to = '';
-$ch = curl_init(PARTNERS_ENDPOINT);
+$ch = curl_init(PARTNER_BY_DOMAIN_ENDPOINT);
 curl_setopt_array($ch, array(
-    CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_TIMEOUT => 15,
-    CURLOPT_HTTPHEADER => array('Content-Type: application/json')));
-$partners = json_decode((string) curl_exec($ch), true);
+    CURLOPT_POST => true,
+    CURLOPT_POSTFIELDS => json_encode(array('pbxUuid' => $domain['domain_uuid'])),
+    // Service-key gated: it answers with a partner's email address, so it is
+    // not a public endpoint. No key means no lookup, and the fallbacks below
+    // take over.
+    CURLOPT_HTTPHEADER => array('Content-Type: application/json',
+                                'system-access-key: ' . SERVICE_KEY),
+    CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_TIMEOUT => 15));
+$owner_raw  = curl_exec($ch);
+$owner_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
-if (is_array($partners) && preg_match('/-(\d+)\./', $domain['domain_name'], $mp)) {
+if ($owner_code === 200) {
+    $owner = json_decode((string) $owner_raw, true);
+    if (is_array($owner) && !empty($owner['email'])) { $to = trim($owner['email']); }
+} else if ($owner_code !== 404) {
+    // 404 is a real answer: nobody owns this domain. Anything else means the
+    // lookup itself is broken, which is worth seeing in the log.
+    fwrite(STDERR, sprintf("owner lookup for %s: HTTP %d\n", $domain['domain_name'], $owner_code));
+}
+
+// 2. Older platforms have no such endpoint. Fall back to matching a partner id
+//    parsed out of the domain name, which is what both jobs did before.
+$ch = $to !== '' ? null : curl_init(PARTNERS_ENDPOINT);
+if ($ch === null) { $partners = null; } else
+{
+    curl_setopt_array($ch, array(
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_TIMEOUT => 15,
+        CURLOPT_HTTPHEADER => array('Content-Type: application/json')));
+    $partners = json_decode((string) curl_exec($ch), true);
+    curl_close($ch);
+}
+if ($to === '' && is_array($partners) && preg_match('/-(\d+)\./', $domain['domain_name'], $mp)) {
     $want = (int) $mp[1];
     $list = isset($partners['data']) && is_array($partners['data']) ? $partners['data'] : $partners;
     foreach ((array) $list as $p) {

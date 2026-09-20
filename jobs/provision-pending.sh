@@ -39,6 +39,10 @@ for f in "$SPOOL"/*; do
         # within the hour" and then nothing, so the only way to find out was to
         # keep reloading the page. Best-effort: the account already exists, so a
         # failure to announce it must not fail the provisioning -- hence || true.
+        # SYSTEM_ACCESS_KEY unlocks the domain-to-partner lookup, which is
+        # service-key gated because it answers with a partner's address.
+        # Without it the job still sends, just to the fallback address.
+        SYSTEM_ACCESS_KEY="${SYSTEM_ACCESS_KEY:-}" \
         php /var/www/fusionpbx/app/rest_api/jobs/recording-sftp-ready.php "$domain" \
             >> /var/log/sftp-ready.log 2>&1 || true
 

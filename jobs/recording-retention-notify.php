@@ -43,6 +43,9 @@ define('EMAIL_ENDPOINT',   RTC_BASE . '/api/v1/email/send');
 // CCL https://selfcare.cosmocom.net (set PORTAL_URL in that box's cron).
 define('PORTAL_URL', rtrim(getenv('PORTAL_URL') ?: 'https://ippbx.alaapcloud.gov.bd:5174', '/'));
 define('PARTNERS_ENDPOINT', RTC_BASE . '/partner/get-partners');
+// auth_user holds pbx_uuid alongside partner_id; nothing else does. Asking it
+// beats parsing the partner id out of the domain name.
+define('PARTNER_BY_DOMAIN_ENDPOINT', RTC_BASE . '/partner/partner-by-pbx-uuid');
 define('NOTIFY_ENDPOINT',   RTC_BASE . '/api/v1/notifications/create');
 // Internal-only endpoint; the shared service key is the gate. Read from the
 // environment so the key is not duplicated into this file. Empty means the bell
@@ -165,8 +168,40 @@ function rtc_partner_emails($domains) {
         }
     }
 
-    // pbx-stax-349.alaapcloud.gov.bd -> 349
+    // Ask who owns each domain. auth_user maps pbx_uuid to partner_id, so this
+    // is the real answer; the name-parsing below is only a fallback for
+    // platforms whose gateway predates the endpoint.
+    //
+    // It matters: four BTCL domains (samsung, hcc_samsung, hcc-manager,
+    // pbx-manager) carry no partner id in their name, matched nothing, and so
+    // had their notices sent to a catch-all address instead of their partner.
     foreach ($domains as $d) {
+        $ch = curl_init(PARTNER_BY_DOMAIN_ENDPOINT);
+        curl_setopt_array($ch, array(
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => json_encode(array('pbxUuid' => $d['domain_uuid'])),
+            // Service-key gated -- it returns a partner's address.
+            CURLOPT_HTTPHEADER => array('Content-Type: application/json',
+                                        'system-access-key: ' . SERVICE_KEY),
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_TIMEOUT => 15));
+        $raw2  = curl_exec($ch);
+        $code2 = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($code2 === 200) {
+            $owner = json_decode((string) $raw2, true);
+            if (is_array($owner) && !empty($owner['email'])) {
+                $by_domain[strtolower($d['domain_uuid'])] = trim($owner['email']);
+                continue;
+            }
+            // Owned, but that user has no address -- the partner list may still
+            // have one against the same id.
+            if (is_array($owner) && !empty($owner['idPartner'])
+                && isset($email_by_id[(int) $owner['idPartner']])) {
+                $by_domain[strtolower($d['domain_uuid'])] = $email_by_id[(int) $owner['idPartner']];
+                continue;
+            }
+        }
+        // Fallback: pbx-stax-349.alaapcloud.gov.bd -> 349
         if (preg_match('/-(\d+)\./', $d['domain_name'], $m)) {
             $id = (int) $m[1];
             if (isset($email_by_id[$id])) {
