@@ -105,6 +105,21 @@ function do_action($body) {
                 $result["base64Error"] = "Could not read file content";
             } else {
                 $result["base64Content"] = base64_encode($file_content);
+
+            // The customer now holds the bytes, so record it. Retention keys on
+            // exported_at and refuses to delete anything never collected, and
+            // until now only SFTP pulls set it -- a customer who downloaded
+            // everything through the portal still counted as having taken
+            // nothing.
+            //
+            // Marked HERE, inside the branch that actually returns the audio,
+            // and never in the branch that only hands back a URL. Marking on
+            // request rather than on delivery is how you end up deleting
+            // something the customer never received.
+            $database->execute(
+                "UPDATE v_xml_cdr SET exported_at = NOW()
+                  WHERE xml_cdr_uuid = :uuid AND exported_at IS NULL",
+                array("uuid" => $call_recording_uuid));
             }
         }
     }

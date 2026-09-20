@@ -30,13 +30,30 @@ $database = new database;
 // cutoff it applies drift by up to a month -- and you will have told customers
 // the wrong deletion date in writing.
 $purge_date = date('Y-m-01', strtotime('first day of next month'));
-$retention_days = 120;
+
+// Two numbers on purpose.
+//
+//   RETENTION_DAYS  what we actually keep, and what the purge deletes against
+//   DISPLAY_DAYS    what customers are told
+//
+// We keep LONGER than we promise, never shorter. A customer who is told 90 days
+// and finds their recordings gone on day 91 has a real complaint; one who is
+// told 90 and finds them still there on day 94 has not. Every customer-facing
+// string says "at least N days", which stays true for as long as the first
+// number is the larger one.
+$retention_days = 95;
+$display_days   = 90;
+if ($retention_days < $display_days) {
+    fwrite(STDERR, "REFUSING: retention_days ($retention_days) is below display_days "
+        . "($display_days). That deletes customer data sooner than they were told.\n");
+    exit(1);
+}
 
 $domains = $database->select("SELECT domain_uuid, domain_name FROM v_domains", array(), 'all');
 if (empty($domains)) { fwrite(STDERR, "no domains\n"); exit(1); }
 
 $cutoff = date('Y-m-d', strtotime($purge_date . ' -' . $retention_days . ' days'));
-printf("purge_date=%s retention=%dd cutoff=%s\n", $purge_date, $retention_days, $cutoff);
+printf("purge_date=%s keep=%dd tell-customers=%dd cutoff=%s\n", $purge_date, $retention_days, $display_days, $cutoff);
 
 foreach ($domains as $d) {
     $p = array("domain_uuid" => $d['domain_uuid'], "cutoff" => $cutoff);

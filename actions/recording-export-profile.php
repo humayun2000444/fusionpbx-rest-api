@@ -21,6 +21,15 @@ function do_action($body) {
 
     $database = new database;
 
+    // What customers are told. Kept in settings so it can change without a
+    // deploy, and separate from what the purge actually uses.
+    $display_days = 90;
+    $row_dd = $database->select(
+        "SELECT default_setting_value FROM v_default_settings
+          WHERE default_setting_category='recordings' AND default_setting_subcategory='display_days'
+            AND default_setting_enabled=true LIMIT 1", array(), 'row');
+    if (!empty($row_dd['default_setting_value'])) { $display_days = (int) $row_dd['default_setting_value']; }
+
     $domain = $database->select(
         "SELECT domain_name FROM v_domains WHERE domain_uuid = :domain_uuid",
         array("domain_uuid" => $domain_uuid), "row");
@@ -65,11 +74,13 @@ function do_action($body) {
         "success" => true,
         "domain"  => $domain['domain_name'],
         "retention" => array(
-            // Always "at least": a month-end purge means real age at deletion is
-            // 120-150 days. Saying "120 days" exactly invites an accusation of
-            // deleting early.
-            "policy"         => "at_least_" . (int) ($status['retention_days'] ?? 120) . "_days",
-            "days"           => (int) ($status['retention_days'] ?? 120),
+            // `days` is what customers are TOLD; `keepDays` is what we actually
+            // keep. They differ deliberately -- we keep longer than we promise,
+            // so "at least N days" is always true and nobody is surprised by an
+            // early deletion. Anything customer-facing must use `days`.
+            "policy"         => "at_least_" . $display_days . "_days",
+            "days"           => $display_days,
+            "keepDays"       => (int) ($status['retention_days'] ?? 95),
             "purgeDate"      => $status['purge_date']  ?? null,
             "cutoffDate"     => $status['cutoff_date'] ?? null,
             "daysUntilPurge" => $days_until,

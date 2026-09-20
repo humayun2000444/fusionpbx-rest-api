@@ -154,7 +154,10 @@ function do_action($body) {
             $zip_files[] = array(
                 "path" => $zip_path,
                 "name" => basename($zip_path),
-                "size" => filesize($zip_path)
+                "size" => filesize($zip_path),
+                // Kept so the recordings in THIS archive can be marked exported
+                // once the archive is actually delivered -- not before.
+                "uuids" => array_map(function ($r) { return $r["uuid"]; }, $batch)
             );
         } else {
             // Cleanup on error
@@ -166,12 +169,18 @@ function do_action($body) {
 
     // Convert zip files to base64
     $result_files = array();
+    // Only archives actually returned as bytes count as exported. A zip too
+    // large to encode is handed back as a path; the customer has not received
+    // it yet and must not be recorded as having done so.
+    $delivered_uuids = array();
     foreach ($zip_files as $zip_file) {
         $zip_size = filesize($zip_file["path"]);
 
         // Only encode if under 100MB (base64 will be ~133% larger)
         if ($zip_size <= 100 * 1024 * 1024) {
             $base64 = base64_encode(file_get_contents($zip_file["path"]));
+            // Delivered as bytes -> these are now in the customer's hands.
+            $delivered_uuids = array_merge($delivered_uuids, $zip_file["uuids"]);
             $result_files[] = array(
                 "fileName" => $zip_file["name"],
                 "fileSize" => $zip_size,
@@ -193,6 +202,21 @@ function do_action($body) {
 
     // Cleanup temp directory
     rmdir($temp_dir);
+
+    // Mark after every archive is built and encoded, never per-file mid-loop:
+    // a failure halfway through would otherwise leave recordings flagged as
+    // collected that the customer never saw.
+    if (!empty($delivered_uuids)) {
+        $delivered_uuids = array_values(array_unique($delivered_uuids));
+        foreach (array_chunk($delivered_uuids, 500) as $chunk) {
+            $ph = array(); $params = array();
+            foreach ($chunk as $i => $u) { $ph[] = ":u$i"; $params["u$i"] = $u; }
+            $database->execute(
+                "UPDATE v_xml_cdr SET exported_at = NOW()
+                  WHERE xml_cdr_uuid IN (" . implode(",", $ph) . ") AND exported_at IS NULL",
+                $params);
+        }
+    }
 
     return array(
         "success" => true,
