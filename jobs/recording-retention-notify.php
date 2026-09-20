@@ -43,6 +43,12 @@ define('EMAIL_ENDPOINT',   RTC_BASE . '/api/v1/email/send');
 // CCL https://selfcare.cosmocom.net (set PORTAL_URL in that box's cron).
 define('PORTAL_URL', rtrim(getenv('PORTAL_URL') ?: 'https://ippbx.alaapcloud.gov.bd:5174', '/'));
 define('PARTNERS_ENDPOINT', RTC_BASE . '/partner/get-partners');
+define('NOTIFY_ENDPOINT',   RTC_BASE . '/api/v1/notifications/create');
+// Internal-only endpoint; the shared service key is the gate. Read from the
+// environment so the key is not duplicated into this file. Empty means the bell
+// is skipped entirely -- which is the correct behaviour anywhere the endpoint
+// does not exist, such as a platform still running an older TelcoREST.
+define('SERVICE_KEY', getenv('SYSTEM_ACCESS_KEY') ?: '');
 // One notice a month, this many days before the purge date. Also the urgent
 // follow-up days, sent ONLY to customers who still have un-downloaded data.
 define('NOTICE_DAYS_BEFORE_PURGE', 14);
@@ -376,6 +382,36 @@ foreach ($rows as $r) {
             fwrite(STDERR, sprintf("TEMPLATE has unreplaced tokens for %s - sending plain text\n",
                 $r['domain_name']));
             $html = '';
+        }
+    }
+
+    // Raise a bell notification alongside the email. The portal's notification
+    // feed has no free-text field -- the UI renders the enum's description -- so
+    // this is a nudge, and the page it points at carries the actual figures.
+    // Best-effort by design: a customer who gets the email but no bell entry has
+    // still been told, and failing the whole notice over a bell entry would be
+    // the wrong trade.
+    $notify_partner = null;
+    if (preg_match('/-(\d+)\./', $r['domain_name'], $mp)) { $notify_partner = (int) $mp[1]; }
+
+    if (!$dry_run && $notify_partner && SERVICE_KEY !== '') {
+        $nch = curl_init(NOTIFY_ENDPOINT);
+        curl_setopt_array($nch, array(
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => json_encode(array(
+                'idPartner' => $notify_partner, 'type' => 'RECORDING_RETENTION')),
+            CURLOPT_HTTPHEADER => array('Content-Type: application/json',
+                                        'system-access-key: ' . SERVICE_KEY),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_TIMEOUT => 15,
+        ));
+        curl_exec($nch);
+        $ncode = curl_getinfo($nch, CURLINFO_HTTP_CODE);
+        curl_close($nch);
+        if ($ncode !== 200) {
+            fwrite(STDERR, sprintf("notification failed for %s (partner %d): HTTP %d\n",
+                $r['domain_name'], $notify_partner, $ncode));
         }
     }
 
