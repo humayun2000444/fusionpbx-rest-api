@@ -102,7 +102,21 @@ function do_action($body) {
         "sftp" => array(
             // Host and port come from the SERVER. The frontend must not know
             // infrastructure, and it differs per platform.
+            // Three states, not two. A row exists from the moment the customer
+            // asks; `enabled` only becomes true once the hourly provisioner has
+            // actually created the account. Reporting just `enabled` made
+            // "never asked" and "asked, still provisioning" indistinguishable,
+            // so the portal showed the Enable button again after a reload and
+            // customers submitted the same request repeatedly.
             "enabled"            => !empty($sftp['enabled']),
+            "pending"            => !empty($sftp) && empty($sftp['enabled']),
+            "status"             => !empty($sftp['enabled'])
+                                      ? 'enabled'
+                                      : (!empty($sftp) ? 'pending' : 'off'),
+            // When they asked, so the UI can say how long it has been waiting
+            // rather than an open-ended "usually within the hour".
+            "requestedAt"        => (!empty($sftp) && empty($sftp['enabled']))
+                                      ? ($sftp['updated_at'] ?? null) : null,
             "host"               => $sftp['host'] ?? null,
             "port"               => isset($sftp['port']) ? (int) $sftp['port'] : null,
             "username"           => $sftp['username'] ?? null,
