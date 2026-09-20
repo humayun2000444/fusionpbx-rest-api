@@ -71,7 +71,28 @@ if (is_array($partners) && preg_match('/-(\d+)\./', $domain['domain_name'], $mp)
     }
 }
 if ($to === '' && !empty($sftp['notify_email'])) { $to = trim($sftp['notify_email']); }
-if ($to === '') { fwrite(STDERR, sprintf("no address for %s - nothing sent\n", $domain['domain_name'])); exit(0); }
+
+// Global fallback, e.g. the NOC. Same setting the retention notice reads, so
+// both jobs address a given domain the same way.
+//
+// This is not optional. The partner lookup keys on a numeric id in the domain
+// name (pbx-innoversal-345...), and plenty of domains have none -- the first
+// account this job ever announced, samsung.btcliptelephony.gov.bd, matched no
+// partner, had no notify_email, and so was told nothing at all.
+if ($to === '') {
+    $row = $database->select(
+        "SELECT default_setting_value FROM v_default_settings
+          WHERE default_setting_category='recordings' AND default_setting_subcategory='notify_email'
+            AND default_setting_enabled=true LIMIT 1", array(), 'row');
+    if (!empty($row['default_setting_value'])) { $to = trim($row['default_setting_value']); }
+}
+
+if ($to === '') {
+    fwrite(STDERR, sprintf("no address for %s - nothing sent. Set v_recording_sftp.notify_email "
+        . "for this domain, or a global fallback in v_default_settings "
+        . "(recordings / notify_email).\n", $domain['domain_name']));
+    exit(0);
+}
 
 $host = $sftp['host'];
 $port = (int) ($sftp['port'] ?: 22);
