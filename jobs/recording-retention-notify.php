@@ -52,6 +52,39 @@ define('NOTICE_DAYS_BEFORE_PURGE', 14);
 define('MIN_RECORDINGS', 10);
 define('URGENT_DAYS', array(3));
 
+// The HTML body lives in a template file rather than inline here so that a test
+// renderer and this job produce byte-identical mail. If it is missing we fall
+// back to the plain-text body rather than sending a broken page.
+define('MAIL_TEMPLATE', __DIR__ . '/templates/retention-notice.html');
+
+/** "2026-10-01" -> "1 October 2026". Customers read dates, not ISO strings. */
+function rn_date($iso) {
+    $t = strtotime($iso);
+    return $t ? date('j F Y', $t) : $iso;
+}
+
+/**
+ * Megabytes below a gigabyte. "0.1 GB" reads as nothing at all and undersells
+ * what the customer is about to lose.
+ */
+function rn_size($bytes) {
+    $b = (float) $bytes;
+    if ($b >= 1073741824) { return number_format($b / 1073741824, 1) . ' GB'; }
+    return number_format($b / 1048576, 0) . ' MB';
+}
+
+/** One row of the summary table. $strong paints the number red. */
+function rn_row($label, $value, $strong = false, $last = false) {
+    $border = $last ? '' : 'border-bottom:1px solid #eef1f4;';
+    $colour = $strong ? '#b42318' : '#1f2d3d';
+    $weight = $strong ? '700' : '600';
+    return '<tr><td style="padding:11px 16px;' . $border . ' color:#5a6875;font-size:13px;">'
+         . htmlspecialchars($label, ENT_QUOTES, 'UTF-8')
+         . '</td><td align="right" style="padding:11px 16px;' . $border
+         . ' color:' . $colour . ';font-size:14px;font-weight:' . $weight . ';">'
+         . htmlspecialchars($value, ENT_QUOTES, 'UTF-8') . '</td></tr>';
+}
+
 $dry_run     = in_array('--dry-run', $argv);
 $urgent_only = in_array('--urgent-only', $argv);
 // Send the monthly notice regardless of the schedule. For the first run, or to
@@ -268,6 +301,68 @@ foreach ($rows as $r) {
     $body .= "own system.\n\n";
     $body .= "Domain: " . $r['domain_name'] . "\n";
 
+    // ---- HTML body -------------------------------------------------------
+    // Same facts as the plain-text body above, same order. If the two ever
+    // disagree the plain-text one is the bug: it is what --show-body prints
+    // and therefore what gets reviewed.
+    $html = '';
+    $tpl = is_readable(MAIL_TEMPLATE) ? file_get_contents(MAIL_TEMPLATE) : false;
+    if ($tpl !== false) {
+        if ($pending > 0) {
+            $preheader = "$count recordings have not been downloaded yet. "
+                       . "They are removed on " . rn_date($r['purge_date']) . ".";
+            $alert = '<tr><td style="padding:0 28px;"><div style="margin-top:20px;background:#fef3f2;'
+                   . 'border:1px solid #fecdca;border-left:4px solid #d92d20;border-radius:6px;padding:14px 16px;">'
+                   . '<div style="color:#b42318;font-size:13px;font-weight:700;letter-spacing:.4px;'
+                   . 'text-transform:uppercase;">Action needed</div>'
+                   . '<div style="color:#7a271a;font-size:14px;line-height:1.6;padding-top:5px;">'
+                   . '<strong>' . $count . ' recordings (' . rn_size($r['pending_bytes']) . ')</strong>'
+                   . ' have not been downloaded yet. They will be removed on <strong>'
+                   . rn_date($r['purge_date']) . '</strong>.</div></div></td></tr>';
+        } else {
+            $preheader = "$total call recordings on file. Nothing is due for removal.";
+            $alert = '';
+        }
+
+        if ($at_risk > 0) {
+            $intro = 'Your Cloud PBX currently holds <strong>' . $total . ' call recordings</strong>.<br><br>'
+                   . 'Recordings are kept for at least <strong>' . $display_days . ' days</strong>. '
+                   . 'Those made before <strong>' . rn_date($r['cutoff_date']) . '</strong> are scheduled '
+                   . 'for removal on <strong>' . rn_date($r['purge_date']) . '</strong>.';
+        } else {
+            $intro = 'Your Cloud PBX currently holds <strong>' . $total . ' call recordings</strong>.<br><br>'
+                   . 'Recordings are kept for at least <strong>' . $display_days . ' days</strong>. '
+                   . 'Nothing is due for removal yet &mdash; your oldest recordings are still well '
+                   . 'inside that window.';
+        }
+
+        $rows = rn_row('Total recordings on file', $total);
+        if ($at_risk > 0) {
+            $rows .= rn_row('Due for removal on ' . rn_date($r['purge_date']), number_format($at_risk));
+            $rows .= rn_row('Not yet downloaded',
+                            $count . '  (' . rn_size($r['pending_bytes']) . ')', $pending > 0);
+            $rows .= rn_row('Oldest not yet downloaded',
+                            $oldest ? $oldest : 'n/a', false, true);
+        } else {
+            $rows .= rn_row('Due for removal', 'none', false, true);
+        }
+
+        $html = str_replace(
+            array('{{PREHEADER}}', '{{ALERT_BLOCK}}', '{{INTRO_HTML}}',
+                  '{{SUMMARY_ROWS}}', '{{PORTAL_URL}}', '{{DOMAIN}}'),
+            array(htmlspecialchars($preheader, ENT_QUOTES, 'UTF-8'), $alert, $intro,
+                  $rows, PORTAL_URL, htmlspecialchars($r['domain_name'], ENT_QUOTES, 'UTF-8')),
+            $tpl);
+
+        // An unreplaced token is visible in the customer's inbox. Send the
+        // plain-text body instead of shipping "{{DOMAIN}}" to a customer.
+        if (preg_match('/\{\{[A-Z_]+\}\}/', $html)) {
+            fwrite(STDERR, sprintf("TEMPLATE has unreplaced tokens for %s - sending plain text\n",
+                $r['domain_name']));
+            $html = '';
+        }
+    }
+
     if ($dry_run) {
         printf("[dry-run] %-42s -> %s\n           %s\n", $r['domain_name'], $to, $subject);
         if ($show_body) { echo "\n---------- body ----------\n$body------------------------\n\n"; }
@@ -277,8 +372,8 @@ foreach ($rows as $r) {
     $payload = json_encode(array(
         'to'      => (strpos($to, ',') !== false) ? array_map('trim', explode(',', $to)) : $to,
         'subject' => $subject,
-        'body'    => $body,
-        'isHtml'  => false,
+        'body'    => $html !== '' ? $html : $body,
+        'isHtml'  => $html !== '',
     ));
 
     $ch = curl_init(EMAIL_ENDPOINT);
