@@ -36,12 +36,57 @@ require_once dirname(__DIR__, 3) . '/resources/require.php';
 // Through the gateway. An earlier version posted straight to 10.10.194.249:7001
 // assuming that was TelcoREST; it is a different service and returned 404 for
 // every send. Override with RTC_BASE_URL on CCL (iptsp.cosmocom.net:8001).
-define('RTC_BASE', getenv('RTC_BASE_URL') ?: 'https://vbs.alaapcloud.gov.bd:4000/FREESWITCHREST');
+
+/**
+ * This platform's own RTC gateway and portal.
+ *
+ * There is deliberately NO default. BTCL and CCL are separate organisations,
+ * and a default pointing at either one means the other silently sends its
+ * customers' mail through a third party's gateway -- logged in their database,
+ * delivered from their sender identity.
+ *
+ * That is not hypothetical: on 2026-09-21 a CCL SFTP notice for
+ * 103.95.96.100 went out through vbs.alaapcloud.gov.bd and landed in BTCL's
+ * email_log as row 125, because the provisioner cron did not set RTC_BASE_URL
+ * and the code fell back to the BTCL URL baked into it.
+ *
+ * Resolution order, each strictly this platform's own:
+ *   1. the environment (what the cron lines set)
+ *   2. v_default_settings, category 'recordings'
+ *   3. nothing -- and then we refuse to send rather than guess
+ *
+ * Guessing wrong here leaks one organisation's customer data into another's
+ * systems, so not sending is the safer failure.
+ */
+function oc_platform_setting($database, $subcategory, $env_name) {
+    $v = getenv($env_name);
+    if ($v !== false && trim($v) !== '') { return rtrim(trim($v), '/'); }
+    try {
+        $row = $database->select(
+            "SELECT default_setting_value FROM v_default_settings
+              WHERE default_setting_category='recordings'
+                AND default_setting_subcategory=:s
+                AND default_setting_enabled=true LIMIT 1",
+            array('s' => $subcategory), 'row');
+        if (!empty($row['default_setting_value'])) { return rtrim(trim($row['default_setting_value']), '/'); }
+    } catch (Exception $e) { /* fall through to the refusal below */ }
+    return '';
+}
+
+$oc_db_for_settings = new database;
+define('RTC_BASE',   oc_platform_setting($oc_db_for_settings, 'rtc_base_url', 'RTC_BASE_URL'));
 define('EMAIL_ENDPOINT',   RTC_BASE . '/api/v1/email/send');
 // The portal a customer actually signs in to. Differs per platform, so it is
 // configurable: BTCL https://ippbx.alaapcloud.gov.bd:5174,
 // CCL https://selfcare.cosmocom.net (set PORTAL_URL in that box's cron).
-define('PORTAL_URL', rtrim(getenv('PORTAL_URL') ?: 'https://ippbx.alaapcloud.gov.bd:5174', '/'));
+define('PORTAL_URL', oc_platform_setting($oc_db_for_settings, 'portal_url', 'PORTAL_URL'));
+if (RTC_BASE === '' || PORTAL_URL === '') {
+    fwrite(STDERR, "REFUSING TO SEND: this platform's own rtc_base_url / portal_url is not set.\n"
+        . "Set RTC_BASE_URL and PORTAL_URL in the cron line, or add them to v_default_settings\n"
+        . "under category 'recordings'. There is no default on purpose: guessing sends one\n"
+        . "organisation's customer mail through another's gateway.\n");
+    exit(1);
+}
 define('PARTNERS_ENDPOINT', RTC_BASE . '/partner/get-partners');
 // auth_user holds pbx_uuid alongside partner_id; nothing else does. Asking it
 // beats parsing the partner id out of the domain name.
