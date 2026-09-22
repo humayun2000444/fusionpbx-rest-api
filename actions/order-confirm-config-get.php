@@ -36,6 +36,11 @@ function do_action($body) {
             "confirmTextBn"        => $c['confirm_text_bn'],
             "cancelTextEn"         => $c['cancel_text_en'],
             "cancelTextBn"         => $c['cancel_text_bn'],
+            // Where the main prompt comes from, so the page can show the
+            // chosen recording instead of guessing it is TTS.
+            "promptSource"         => (isset($c['prompt_source']) && $c['prompt_source'] === 'recording')
+                                        ? 'recording' : 'tts',
+            "promptRecordingUuid"  => isset($c['prompt_recording_uuid']) ? $c['prompt_recording_uuid'] : null,
             "callerIdName"         => $c['caller_id_name'],
             "callerIdNumber"       => $c['caller_id_number'],
             "defaultSupportNumber" => $c['default_support_number'],

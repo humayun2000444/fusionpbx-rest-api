@@ -527,6 +527,45 @@ function oc_char_count($template, $vars) {
  * TTS credits. Audio specs are returned raw; the caller base64-encodes them for
  * transport to the Lua.
  */
+/**
+ * Absolute playback spec for a recorded prompt, or null to synthesise.
+ *
+ * A per-call recording wins over the domain default, so one survey can use its
+ * own audio without changing the config for everything else.
+ *
+ * Returns null -- meaning "fall back to TTS" -- whenever the recording is not
+ * usable: no uuid, row missing, wrong domain, or the file is not on disk. A
+ * prompt that cannot be played must degrade to synthesis rather than to
+ * silence, which is the failure this whole feature exists to avoid.
+ */
+function oc_prompt_audio($config, $call) {
+    $uuid = '';
+    if (!empty($call['prompt_recording_uuid'])) {
+        $uuid = trim($call['prompt_recording_uuid']);
+    } else if (isset($config['prompt_source']) && $config['prompt_source'] === 'recording'
+               && !empty($config['prompt_recording_uuid'])) {
+        $uuid = trim($config['prompt_recording_uuid']);
+    }
+    if ($uuid === '' || !preg_match('/^[0-9a-fA-F\-]{36}$/', $uuid)) { return null; }
+
+    try { $db = new database; } catch (Exception $e) { return null; }
+
+    // Scoped to the call's domain: a recording uuid from another tenant must
+    // not be playable here.
+    $row = $db->select(
+        "SELECT r.recording_filename, d.domain_name
+           FROM v_recordings r JOIN v_domains d ON d.domain_uuid = r.domain_uuid
+          WHERE r.recording_uuid = :u AND r.domain_uuid = :d LIMIT 1",
+        array('u' => $uuid, 'd' => $call['domain_uuid']), 'row');
+    if (empty($row['recording_filename'])) { return null; }
+
+    // FusionPBX keeps a domain's recordings under its own directory.
+    $path = '/var/lib/freeswitch/recordings/' . $row['domain_name'] . '/' . $row['recording_filename'];
+    if (!is_readable($path)) { return null; }
+
+    return 'file://' . $path;
+}
+
 function oc_build_playback($config, $call) {
     $language = !empty($call['language']) ? $call['language'] : ($config['default_language'] ?: 'en');
     $tmpl = ($language === 'bn') ? $config['message_template_bn'] : $config['message_template_en'];
@@ -535,9 +574,17 @@ function oc_build_playback($config, $call) {
         : (isset($config['ack_text_en']) ? $config['ack_text_en'] : 'Thank you, your response has been recorded.');
 
     $vars = oc_resolve_vars($call);
-    $tts  = oc_generate_tts_chain($config, $tmpl, $vars, $language);
+
+    // A recorded prompt replaces synthesis for the main message only. The ack
+    // and per-option replies are short, already cached in practice, and vary by
+    // which digit was pressed -- recording every combination is not worth it.
+    $prompt_audio = oc_prompt_audio($config, $call);
+    $tts  = ($prompt_audio !== null)
+        ? $prompt_audio
+        : oc_generate_tts_chain($config, $tmpl, $vars, $language);
     $ack  = oc_generate_tts_chain($config, $ack_t, $vars, $language);
-    $msg_chars = oc_char_count($tmpl, $vars);
+    // No provider call means no characters to account for.
+    $msg_chars = ($prompt_audio !== null) ? 0 : oc_char_count($tmpl, $vars);
     $ack_chars = oc_char_count($ack_t, $vars);
 
     // Dynamic DTMF option map (see oc_originate's original comment for the format).

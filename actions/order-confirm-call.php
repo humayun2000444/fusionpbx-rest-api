@@ -71,15 +71,22 @@ function do_action($body) {
     $ok = $database->execute(
         "INSERT INTO v_order_confirm_calls
             (call_uuid, domain_uuid, order_id, customer_name, phone, language,
-             confirm_url, support_number, metadata, status, max_attempts, next_attempt_date, insert_date)
+             confirm_url, support_number, metadata, status, max_attempts, next_attempt_date, insert_date,
+             prompt_recording_uuid)
          VALUES
             (:call_uuid, :domain_uuid, :order_id, :name, :phone, :language,
-             :confirm_url, :support_number, CAST(:metadata AS JSONB), 'pending', :max_attempts, NOW(), NOW())",
+             :confirm_url, :support_number, CAST(:metadata AS JSONB), 'pending', :max_attempts, NOW(), NOW(),
+             CAST(:prompt_recording_uuid AS UUID))",
         array(
             'call_uuid' => $call_uuid, 'domain_uuid' => $db_domain_uuid,
             'order_id' => $order_id, 'name' => $name, 'phone' => $phone, 'language' => $language,
             'confirm_url' => $confirm_url, 'support_number' => $support_number,
             'metadata' => $metadata, 'max_attempts' => $max_attempts,
+            // Per-call recorded prompt. NULL rather than '' so the UUID cast
+            // holds, and NULL is what tells the IVR to use the domain config.
+            'prompt_recording_uuid' => (isset($body->promptRecordingUuid)
+                && preg_match('/^[0-9a-fA-F\-]{36}$/', trim($body->promptRecordingUuid)))
+                    ? trim($body->promptRecordingUuid) : null,
         )
     );
     if ($ok === false) {

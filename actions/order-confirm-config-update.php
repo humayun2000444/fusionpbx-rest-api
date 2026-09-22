@@ -16,6 +16,10 @@ function do_action($body) {
     // camelCase -> column, with a type: b(ool) i(nt) s(tring)
     $map = array(
         'enabled' => array('enabled','b'),
+        // Where the main prompt comes from. 'recording' plays an uploaded file
+        // instead of synthesising; anything else means TTS.
+        'promptSource' => array('prompt_source','s'),
+        'promptRecordingUuid' => array('prompt_recording_uuid','s'),
         'defaultLanguage' => array('default_language','s'),
         'voiceGender' => array('voice_gender','s'),
         'messageTemplateEn' => array('message_template_en','s'),
