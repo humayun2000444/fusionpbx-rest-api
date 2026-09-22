@@ -72,11 +72,11 @@ function do_action($body) {
         "INSERT INTO v_order_confirm_calls
             (call_uuid, domain_uuid, order_id, customer_name, phone, language,
              confirm_url, support_number, metadata, status, max_attempts, next_attempt_date, insert_date,
-             prompt_recording_uuid)
+             prompt_recording_uuid, dtmf_options)
          VALUES
             (:call_uuid, :domain_uuid, :order_id, :name, :phone, :language,
              :confirm_url, :support_number, CAST(:metadata AS JSONB), 'pending', :max_attempts, NOW(), NOW(),
-             CAST(:prompt_recording_uuid AS UUID))",
+             CAST(:prompt_recording_uuid AS UUID), CAST(:dtmf_options AS JSONB))",
         array(
             'call_uuid' => $call_uuid, 'domain_uuid' => $db_domain_uuid,
             'order_id' => $order_id, 'name' => $name, 'phone' => $phone, 'language' => $language,
@@ -84,6 +84,10 @@ function do_action($body) {
             'metadata' => $metadata, 'max_attempts' => $max_attempts,
             // Per-call recorded prompt. NULL rather than '' so the UUID cast
             // holds, and NULL is what tells the IVR to use the domain config.
+            // Per-call keypad map. NULL, not '{}', so the IVR falls through to
+            // the domain config rather than finding an empty option set.
+            'dtmf_options' => (isset($body->dtmfOptions) && is_array($body->dtmfOptions) && count($body->dtmfOptions))
+                ? json_encode($body->dtmfOptions) : null,
             'prompt_recording_uuid' => (isset($body->promptRecordingUuid)
                 && preg_match('/^[0-9a-fA-F\-]{36}$/', trim($body->promptRecordingUuid)))
                     ? trim($body->promptRecordingUuid) : null,

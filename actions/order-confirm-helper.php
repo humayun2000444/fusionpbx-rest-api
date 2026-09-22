@@ -588,9 +588,16 @@ function oc_build_playback($config, $call) {
     $ack_chars = oc_char_count($ack_t, $vars);
 
     // Dynamic DTMF option map (see oc_originate's original comment for the format).
+    // A call's own keypad map wins over the domain's. Without this a CSAT
+    // survey asking for 1-5 inherited the order-confirmation digits (1, 2) and
+    // silently ignored 3, 4 and 5 -- the caller hears "press 1 to 5", presses 4,
+    // and the call ends "no_input".
     $opts = array();
-    if (!empty($config['dtmf_options'])) {
-        $decoded = is_array($config['dtmf_options']) ? $config['dtmf_options'] : json_decode($config['dtmf_options'], true);
+    $src = null;
+    if (!empty($call['dtmf_options']))        { $src = $call['dtmf_options']; }
+    else if (!empty($config['dtmf_options'])) { $src = $config['dtmf_options']; }
+    if ($src !== null) {
+        $decoded = is_array($src) ? $src : json_decode($src, true);
         if (is_array($decoded)) $opts = $decoded;
     }
     if (empty($opts)) {
