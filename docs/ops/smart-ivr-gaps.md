@@ -198,3 +198,32 @@ grep <fs_call_uuid> /var/log/freeswitch/freeswitch.log \
 **Dispositions worth recognising:** `tts_error` — audio never generated (item 3);
 `no_input` — caller pressed a digit the IVR was not told to accept (item 2);
 `no_gateway` — the domain has no outbound gateway, and the call was never placed.
+
+---
+
+## Appendix: never put a secret containing `%` on a cron line
+
+**cron treats an unescaped `%` in the command as a newline.** Everything after
+it becomes stdin, so the job silently does nothing — no error, no log file, no
+entry in the journal. The line looks perfectly correct when you read it.
+
+BTCL's service key ends `#$%&`. Adding it to `/etc/cron.d/recording-export` on
+2026-09-20 killed every line that carried it, and it went unnoticed for three
+days because the failure is invisible:
+
+```
+export-status.log      2026-09-23 02:10   line has NO key  -> still running
+retention-notify.log   never              line HAS the key -> dead on arrival
+sftp-provision.log     2026-09-20 23:15   line HAS the key -> stopped that day
+```
+
+The tell is a log file that never appears, next to sibling jobs in the same
+file that log fine.
+
+**Keep per-platform secrets in `v_default_settings`**, category `recordings`,
+subcategory `system_access_key`. The jobs resolve environment first, then that
+setting, so a cron line needs no key at all and no escaping question arises.
+
+If a key must go on a cron line, escape it as `\%` — but prefer not to. CCL's
+key is 32 hex characters precisely to avoid this class of problem; BTCL's
+predates that choice.
