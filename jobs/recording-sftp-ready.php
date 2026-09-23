@@ -298,7 +298,11 @@ curl_setopt_array($ch, array(
         'subject' => $subject,
         'body'    => $html !== '' ? $html : $body,
         'isHtml'  => $html !== '')),
-    CURLOPT_HTTPHEADER => array('Content-Type: application/json'),
+    // /api/v1/email/send is service-key gated. It used to be anonymous, which
+    // made it an open relay: anyone who knew the URL could send mail from a
+    // .gov.bd sender to any recipient.
+    CURLOPT_HTTPHEADER => array('Content-Type: application/json',
+                                'system-access-key: ' . SERVICE_KEY),
     CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_TIMEOUT => 20));
 $resp = curl_exec($ch);
 $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);

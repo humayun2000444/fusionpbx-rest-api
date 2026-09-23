@@ -600,7 +600,11 @@ foreach ($rows as $r) {
     curl_setopt_array($ch, array(
         CURLOPT_POST => true,
         CURLOPT_POSTFIELDS => $payload,
-        CURLOPT_HTTPHEADER => array('Content-Type: application/json'),
+        // /api/v1/email/send is service-key gated. It used to be anonymous,
+        // which made it an open relay: anyone who knew the URL could send mail
+        // from a .gov.bd sender to any recipient.
+        CURLOPT_HTTPHEADER => array('Content-Type: application/json',
+                                    'system-access-key: ' . SERVICE_KEY),
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT => 20,
     ));
