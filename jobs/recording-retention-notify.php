@@ -502,6 +502,14 @@ foreach ($rows as $r) {
                    . 'inside that window.';
         }
 
+        // Call records share the same retention story, so they share the same
+        // monthly email. Two separate notices about the same deletion date
+        // trains customers to ignore both.
+        $cdr = $database->select(
+            "SELECT total_count, at_risk_count, pending_count, pending_oldest, display_days
+               FROM v_cdr_export_status WHERE domain_uuid = :d",
+            array('d' => $r['domain_uuid']), 'row');
+
         $rows = rn_row('Total recordings on file', $total);
         if ($at_risk > 0) {
             $rows .= rn_row('Due for removal on ' . rn_date($r['purge_date']), number_format($at_risk));
@@ -511,6 +519,22 @@ foreach ($rows as $r) {
                             $oldest ? $oldest : 'n/a', false, true);
         } else {
             $rows .= rn_row('Due for removal', 'none', false, true);
+        }
+
+        // CDR section, only when there is something to say. A customer with no
+        // call records does not need a line telling them so.
+        if (!empty($cdr) && (int) $cdr['total_count'] > 0) {
+            $cdr_total   = number_format((int) $cdr['total_count']);
+            $cdr_at_risk = (int) $cdr['at_risk_count'];
+            $cdr_pending = (int) $cdr['pending_count'];
+            $rows .= rn_row('Call records on file', $cdr_total);
+            if ($cdr_at_risk > 0) {
+                $rows .= rn_row('Call records due for removal', number_format($cdr_at_risk));
+                if ($cdr_pending > 0) {
+                    $rows .= rn_row('Call records not yet downloaded',
+                                    number_format($cdr_pending), true, true);
+                }
+            }
         }
 
         $html = str_replace(
