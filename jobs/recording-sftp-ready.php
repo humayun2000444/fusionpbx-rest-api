@@ -38,6 +38,20 @@ require_once dirname(__DIR__, 3) . '/resources/require.php';
  * Guessing wrong here leaks one organisation's customer data into another's
  * systems, so not sending is the safer failure.
  */
+function oc_service_key($database) {
+    $v = getenv('SYSTEM_ACCESS_KEY');
+    if ($v !== false && trim($v) !== '') { return trim($v); }
+    try {
+        $row = $database->select(
+            "SELECT default_setting_value FROM v_default_settings
+              WHERE default_setting_category='recordings'
+                AND default_setting_subcategory='system_access_key'
+                AND default_setting_enabled=true LIMIT 1", array(), 'row');
+        if (!empty($row['default_setting_value'])) { return trim($row['default_setting_value']); }
+    } catch (Exception $e) { /* fall through */ }
+    return '';
+}
+
 function oc_platform_setting($database, $subcategory, $env_name) {
     $v = getenv($env_name);
     if ($v !== false && trim($v) !== '') { return rtrim(trim($v), '/'); }
@@ -77,7 +91,52 @@ if (RTC_BASE === '' || PORTAL_URL === '') {
 }
 // Empty means skip the bell. Correct anywhere the endpoint does not exist,
 // such as a platform still running an older TelcoREST.
-define('SERVICE_KEY', getenv('SYSTEM_ACCESS_KEY') ?: '');
+// This platform's own service key. Read the same way as rtc_base_url, and for
+// the same reason: BTCL and CCL are separate organisations running separate
+// TelcoREST instances with DIFFERENT keys. Copying one platform's key into the
+// other's cron does not authenticate -- it just fails 403 on every send.
+//
+// That happened on 2026-09-23: /api/v1/email/send became service-key gated,
+// CCL's cron still carried BTCL's key, and every CCL notice failed silently.
+//
+//   1. the environment (what the cron line sets)
+//   2. v_default_settings, category 'recordings', subcategory 'system_access_key'
+//   3. empty -- and then the preflight below refuses to send rather than
+//      hammering the gateway once per customer
+define('SERVICE_KEY', oc_service_key($oc_db_for_settings));
+
+/**
+ * Prove the key works BEFORE mailing anyone.
+ *
+ * Without this a wrong key means one 403 per customer, buried in a log nobody
+ * reads, and the run looks like it did something. One probe up front turns
+ * that into a single actionable line.
+ *
+ * Returns '' when the endpoint is reachable and the key is accepted.
+ */
+function oc_check_service_key($endpoint, $key) {
+    $ch = curl_init($endpoint);
+    curl_setopt_array($ch, array(
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => '{}',
+        CURLOPT_HTTPHEADER => array('Content-Type: application/json',
+                                    'system-access-key: ' . $key),
+        CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYPEER => false, CURLOPT_TIMEOUT => 15));
+    curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    // 400 is success here: the key was accepted and only the empty body was
+    // rejected. 403 is the key being refused.
+    if ($code === 403) {
+        return "the gateway refused this platform's service key (HTTP 403).\n"
+             . "  Set the key THIS platform's TelcoREST uses, not another's:\n"
+             . "    SYSTEM_ACCESS_KEY=... on the cron line, or\n"
+             . "    v_default_settings category 'recordings' subcategory 'system_access_key'\n"
+             . "  It is the SYSTEM_ACCESS_KEY in this platform's TelcoREST environment.";
+    }
+    if ($code === 0) { return "could not reach $endpoint"; }
+    return '';
+}
 define('MAIL_TEMPLATE', __DIR__ . '/templates/sftp-ready.html');
 
 /**
@@ -103,6 +162,20 @@ function rn_valid_emails($raw) {
 }
 
 $dry_run = in_array('--dry-run', $argv);
+
+// Same preflight. This one runs per provisioning rather than per batch, but a
+// wrong key still means the customer is told nothing while the log says
+// "email -> ... http=403", which reads like a delivery problem rather than a
+// configuration one.
+if (!in_array('--dry-run', $argv)) {
+    $key_problem = (SERVICE_KEY === '')
+        ? "no service key for this platform."
+        : oc_check_service_key(EMAIL_ENDPOINT, SERVICE_KEY);
+    if ($key_problem !== '') {
+        fwrite(STDERR, "REFUSING TO SEND: " . $key_problem . "\n");
+        exit(0);   // 0: the account exists, provisioning must not be failed by this
+    }
+}
 $arg = null;
 foreach (array_slice($argv, 1) as $a) { if (substr($a, 0, 2) !== '--') { $arg = $a; break; } }
 if (empty($arg)) {
