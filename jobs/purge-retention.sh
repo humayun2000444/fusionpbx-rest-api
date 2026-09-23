@@ -93,14 +93,55 @@ while IFS= read -r dir; do
 done < <(find "$SFTP_ROOT" -mindepth 4 -maxdepth 4 -type d -path '*/recordings/*' 2>/dev/null | sort)
 
 # ── 2. archive tree ──────────────────────────────────────────────────────────
-echo "--- archive tree (older than $CUTOFF)"
-count=0; bytes=0
+#
+# UPLOADED AUDIO LIVES IN THIS SAME TREE AND MUST NEVER BE DELETED.
+#
+# /var/lib/freeswitch/recordings holds two unrelated things: call recordings,
+# which age out, and files a customer uploaded -- IVR greetings, hold music,
+# survey prompts -- which are configuration and must outlive any retention
+# window. Both are .mp3 in the same per-domain directory, so age alone cannot
+# tell them apart.
+#
+# Checked 2026-09-23: of the 13 files this block selected, 11 were registered
+# uploads -- Welcome.mp3, Despacito.mp3, the ElevenLabs greetings, the CSAT
+# prompt -- across five domains. Deleting them would have silently broken
+# those IVRs, and nothing would have said why.
+#
+# v_recordings is the register of uploads. Anything listed there is skipped,
+# whatever its age. If that list cannot be read we delete NOTHING from this
+# tree, because the alternative is destroying configuration we cannot identify.
+KEEP_LIST=$(mktemp)
+if su postgres -c "psql -d fusionpbx -At -F'/' -c \"
+      SELECT d.domain_name, r.recording_filename
+        FROM v_recordings r JOIN v_domains d USING (domain_uuid)
+       WHERE r.recording_filename IS NOT NULL AND r.recording_filename <> '';\"" \
+      > "$KEEP_LIST" 2>/dev/null && [[ -s "$KEEP_LIST" ]]; then
+    echo "--- archive tree (older than $CUTOFF), protecting $(wc -l < "$KEEP_LIST") uploaded file(s)"
+else
+    echo "--- archive tree: CANNOT read v_recordings — skipping this tree entirely."
+    echo "    Refusing to delete audio when uploads cannot be identified."
+    rm -f "$KEEP_LIST"
+    KEEP_LIST=""
+fi
+
+count=0; bytes=0; kept=0
+if [[ -n "$KEEP_LIST" ]]; then
 while IFS= read -r f; do
     [[ -z "$f" ]] && continue
+    rel="${f#$ARCHIVE_ROOT/}"
+    # Match on domain/filename, and on the bare filename too: the same upload
+    # is copied into several domains under one name.
+    if grep -qxF "$rel" "$KEEP_LIST" 2>/dev/null \
+       || grep -qF "/$(basename "$f")" "$KEEP_LIST" 2>/dev/null; then
+        kept=$((kept+1)); continue
+    fi
     sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
     if [[ $APPLY -eq 1 ]]; then rm -f -- "$f"; fi
     count=$((count+1)); bytes=$((bytes+sz))
 done < <(find "$ARCHIVE_ROOT" -type f -name '*.mp3' ! -newermt "$CUTOFF" 2>/dev/null)
+echo "    protected $kept uploaded file(s) from deletion"
+rm -f "$KEEP_LIST"
+fi
 
 human=$(numfmt --to=iec --suffix=B "$bytes" 2>/dev/null || echo "${bytes}B")
 if [[ $APPLY -eq 1 ]]; then echo "deleted $count files, $human"
