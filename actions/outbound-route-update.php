@@ -1,4 +1,5 @@
 <?php
+require_once(__DIR__ . '/outbound-route-xml-helper.php');
 $required_params = array("dialplan_uuid");
 
 function do_action($body) {
@@ -104,6 +105,33 @@ function do_action($body) {
         $database = new database;
         $database->execute($sql, $parameters);
         unset($parameters);
+    }
+
+    // Rebuild the XML from the rows we just changed.
+    //
+    // FreeSWITCH executes v_dialplans.dialplan_xml, not v_dialplan_details.
+    // Updating the details alone leaves the switch running the previous route
+    // while the portal and the FusionPBX GUI both show the new one -- and the
+    // reloadxml below then reloads the STALE blob, so the call reports success
+    // and nothing actually changed. outbound-route-create.php has always done
+    // this; update never did.
+    $dp = $database->select(
+        "SELECT dialplan_name, dialplan_continue FROM v_dialplans WHERE dialplan_uuid = :u",
+        array("u" => $body->dialplan_uuid), 'row');
+    if (!empty($dp)) {
+        $regen = generate_dialplan_xml(
+            $body->dialplan_uuid,
+            $dp['dialplan_name'],
+            isset($dp['dialplan_continue']) ? $dp['dialplan_continue'] : 'false');
+        if ($regen) {
+            update_dialplan_xml($body->dialplan_uuid, $regen);
+        } else {
+            // Do not reload against a blob we failed to rebuild: the switch
+            // would keep the old route while we report success.
+            return array("success" => false,
+                "error" => "Could not regenerate the dialplan XML. The route was NOT applied to "
+                         . "the switch; detail rows and XML would have diverged.");
+        }
     }
 
     // Clear cache and reload dialplan
