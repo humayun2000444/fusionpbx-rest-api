@@ -1,0 +1,40 @@
+--- a/app/xml_cdr/resources/service/xml_cdr.php
++++ b/app/xml_cdr/resources/service/xml_cdr.php
+@@ -145,7 +145,36 @@
+ 	while (true) {
+ 
+ 		//get the list of call detail records, and limit the number of records
+-		$xml_cdr_array = array_slice(glob($xml_cdr_dir . '/*.cdr.xml'), 0, 100);
++		//
++		// Was: array_slice(glob($xml_cdr_dir . '/*.cdr.xml'), 0, 100)
++		//
++		// glob() builds and sorts the ENTIRE directory listing before the slice
++		// throws all but 100 of it away, so the cost of collecting a fixed 100
++		// files grew with the size of the spool. On 2026-09-24 that spool held
++		// 580,000 files: the daemon spent most of a core on directory scanning,
++		// the import rate fell to about a tenth of the arrival rate, and every
++		// file that piled up made the next pass slower still.
++		//
++		// readdir stops at 100 matches, so a pass costs the same whether the
++		// spool holds a hundred files or a million. Order is no longer sorted by
++		// name, which is fine -- and closer to oldest-first, since these names
++		// are uuids and sorting by them was arbitrary anyway. Every file the
++		// loop touches is unlinked on success or moved under failed/ on error,
++		// so nothing is read twice.
++		$xml_cdr_array = array();
++		$dir_handle = opendir($xml_cdr_dir);
++		if ($dir_handle !== false) {
++			while (($entry = readdir($dir_handle)) !== false) {
++				if (substr($entry, -8) !== '.cdr.xml') {
++					continue;
++				}
++				$xml_cdr_array[] = $xml_cdr_dir . '/' . $entry;
++				if (count($xml_cdr_array) >= 100) {
++					break;
++				}
++			}
++			closedir($dir_handle);
++		}
+ 
+ 		//process the call detail records
+ 		if (!empty($xml_cdr_array)) {
