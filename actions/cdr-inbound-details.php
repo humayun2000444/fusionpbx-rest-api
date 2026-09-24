@@ -75,7 +75,7 @@ function do_action($body) {
         "SELECT count(*) FROM v_xml_cdr m WHERE " . implode(" AND ", $where),
         $parameters, 'column');
 
-    $sql = "SELECT m.xml_cdr_uuid, m.start_stamp, m.end_stamp, m.start_epoch, m.end_epoch,
+    $sql = "SELECT m.xml_cdr_uuid, m.direction, m.start_stamp, m.end_stamp, m.start_epoch, m.end_epoch,
                    m.caller_id_name, m.caller_id_number, m.caller_destination, m.destination_number,
                    m.cc_queue, m.cc_queue_joined_epoch, m.cc_queue_answered_epoch,
                    m.cc_queue_canceled_epoch, m.cc_queue_terminated_epoch,
@@ -160,6 +160,9 @@ function do_action($body) {
 
         $calls[] = array(
             'call_id' => $r['xml_cdr_uuid'],
+            // 'outbound' when a dialer/campaign call was answered and queued:
+            // the CRM counts those as PD calls, not inbound ones.
+            'call_direction' => $r['direction'],
             'start_stamp' => $r['start_stamp'],
             'end_stamp' => $r['end_stamp'],
             'start_epoch' => (int) $r['start_epoch'],
