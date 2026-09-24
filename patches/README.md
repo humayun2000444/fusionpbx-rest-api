@@ -35,6 +35,43 @@ and that ordering was arbitrary.
 Effect: the spool had been growing ~82,000/hour and began draining ~8,200 per
 5 minutes.
 
+**Second change in the same patch: skip CDRs already in the database.**
+
+Added 2026-09-24 after a customer (stax) reported extensions 103, 106 and 109
+showing far fewer calls than they had actually made. They were right, and the
+cause was not the backlog.
+
+**Two importers were running against the same spool.** `xml_cdr.service` (the
+daemon) and a cron entry in www-data's crontab firing every minute:
+
+    * * * * * /usr/bin/flock -n /tmp/xml_cdr_import.lock sh -c 'cd /var/www/fusionpbx && php app/xml_cdr/xml_cdr_import.php 5000'
+
+The `flock` only stopped two *cron* runs overlapping; it knew nothing about the
+daemon. Both picked up the same files. One inserted the row, the other raised
+23505 on `v_xml_cdr_pkey`, which **aborts the transaction** — so every statement
+after it failed with 25P02 `current transaction is aborted`, `save()` returned
+falsy for the *whole batch*, and every file in it was moved to `failed/sql`
+**even though its row had already committed**. 84,742 files piled up that way in
+one day, and replaying them just raised fresh duplicates that took down more
+batches.
+
+The cron entry is now commented out — **that crontab is `chattr +i +a`**, so
+editing it needs `chattr -i -a` first, then `chattr +i +a` after; without that,
+`crontab -u` fails with `rename: Operation not permitted` and a plain `cp`
+silently does nothing. Run ONE importer.
+
+The patch adds a belt-and-braces guard: one indexed lookup per batch against the
+primary key, and any file whose CDR is already recorded is unlinked instead of
+being allowed to reach the transaction. Measured after both changes: new
+failures went from ~440 per 90 seconds to **0**.
+
+## replay-failed-cdr.sh
+
+`jobs/replay-failed-cdr.sh`, installed at `/usr/local/sbin/`. Moves files out of
+`failed/sql` back into the spool in throttled batches, backing off if the spool
+climbs past 250k. Only safe **with** the dedupe patch above — without it,
+replaying already-imported files is what feeds the cascade.
+
 Note this was not the whole story — see
 `migrations/20260924-cdr-admin-query-performance.sql`. The importer was also
 being starved of disk I/O by un-indexed CDR page queries seq scanning 11 GB.

@@ -38,3 +38,59 @@
  
  		//process the call detail records
  		if (!empty($xml_cdr_array)) {
+@@ -156,6 +185,55 @@
+ 
+ 				//sleep for a moment
+ 				sleep(3);
++			}
++
++			// Drop files whose CDR is already in the database before any of them
++			// reach a transaction.
++			//
++			// 2026-09-24: 84,742 files sat in failed/sql, and sampling them showed
++			// their rows were ALREADY committed. The sequence is: a batch inserts
++			// fine, a later file in the same batch is a duplicate, that raises
++			// 23505 on v_xml_cdr_pkey, the transaction aborts, and every
++			// subsequent statement fails with 25P02 "current transaction is
++			// aborted". save() then returns falsy for the whole batch, so files
++			// whose data landed perfectly well get moved to failed/sql -- and
++			// replaying those files re-inserts them, raising a fresh duplicate
++			// that takes down another batch. It feeds itself.
++			//
++			// One indexed lookup per batch against the primary key stops the
++			// duplicate ever reaching the transaction, so nothing gets dragged
++			// down with it. The file is unlinked because its CDR is already
++			// recorded -- there is nothing left to import.
++			if (!empty($xml_cdr_array)) {
++				$uuid_map = array();
++				foreach ($xml_cdr_array as $f) {
++					$u = preg_replace('/^[ab]_/', '', basename($f, '.cdr.xml'));
++					if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $u)) {
++						$uuid_map[$u] = $f;
++					}
++				}
++				if (!empty($uuid_map)) {
++					$names = array();
++					$params = array();
++					$n = 0;
++					foreach (array_keys($uuid_map) as $u) {
++						$k = 'u'.$n++;
++						$names[] = ':'.$k;
++						$params[$k] = $u;
++					}
++					$already = $database->select(
++						"SELECT xml_cdr_uuid FROM v_xml_cdr WHERE xml_cdr_uuid IN (".implode(',', $names).")",
++						$params, 'all');
++					if (!empty($already)) {
++						foreach ($already as $row) {
++							$u = $row['xml_cdr_uuid'];
++							if (isset($uuid_map[$u]) && file_exists($uuid_map[$u])) {
++								unlink($uuid_map[$u]);
++								$xml_cdr_array = array_diff($xml_cdr_array, array($uuid_map[$u]));
++							}
++						}
++					}
++				}
+ 			}
+ 
+ 			foreach ($xml_cdr_array as $xml_cdr_file) {
