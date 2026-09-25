@@ -54,29 +54,63 @@ alert() {
 
 touch "$STATE" 2>/dev/null || true
 
-# --- 1. exactly one importer -------------------------------------------------
-# The daemon is the one we keep. xml_cdr_import.php is the cron-style importer;
-# if it is alive at the same time as the daemon, that is the 2026-09-24 bug
-# recurring -- someone re-added the cron entry, or ran it by hand.
-daemon_up=$(systemctl is-active "$SERVICE" 2>/dev/null)
-mapfile -t cron_importers < <(pgrep -f 'xml_cdr_import\.php' 2>/dev/null)
+# --- 0. which importer is this box supposed to run? --------------------------
+# BTCL runs the daemon (xml_cdr.service). CCL has no unit file at all and runs
+# xml_cdr_import.php from cron. Getting this backwards is dangerous: on a
+# cron-only box, "start the daemon" would create the very daemon-plus-cron race
+# this script exists to prevent. So detect rather than assume.
+if systemctl cat "$SERVICE" >/dev/null 2>&1; then
+    MODE=daemon
+else
+    MODE=cron
+fi
+[ -n "${IMPORTER_MODE:-}" ] && MODE="$IMPORTER_MODE"
 
-if [ "$daemon_up" = "active" ] && [ "${#cron_importers[@]}" -gt 0 ]; then
-    alert dual-importer \
-        "xml_cdr_import.php (pids: ${cron_importers[*]}) running while $SERVICE is active. \
+daemon_up=$(systemctl is-active "$SERVICE" 2>/dev/null || echo inactive)
+mapfile -t cron_importers < <(pgrep -f 'xml_cdr_import\.php' 2>/dev/null)
+killed=0
+
+# --- 1. exactly one importer -------------------------------------------------
+if [ "$MODE" = daemon ]; then
+    # The daemon is the keeper; any xml_cdr_import.php is the 2026-09-24 bug.
+    if [ "$daemon_up" = "active" ] && [ "${#cron_importers[@]}" -gt 0 ]; then
+        alert dual-importer \
+            "xml_cdr_import.php (pids: ${cron_importers[*]}) running while $SERVICE is active. \
 This is what corrupted CDR reporting on 2026-09-24: both importers take the same files, \
 the loser raises a duplicate key, the transaction aborts and the whole batch is discarded \
 into failed/sql. Killing it. Check for a re-added cron entry -- www-data's crontab is chattr +i +a."
-    for p in "${cron_importers[@]}"; do kill -9 "$p" 2>/dev/null; done
-    # kill the flock/sh wrappers too, or cron just respawns into the same lock
-    pkill -9 -f 'flock -n /tmp/xml_cdr_import.lock' 2>/dev/null
-    log "killed ${#cron_importers[@]} stray importer process(es)"
-fi
+        for p in "${cron_importers[@]}"; do kill -9 "$p" 2>/dev/null; killed=$((killed+1)); done
+        pkill -9 -f 'flock -n /tmp/xml_cdr_import.lock' 2>/dev/null
+        log "killed $killed stray importer process(es)"
+    fi
 
-# --- 2. the daemon must be running -------------------------------------------
-if [ "$daemon_up" != "active" ]; then
-    alert daemon-down "$SERVICE is $daemon_up -- starting it. Nothing imports CDRs while it is down."
-    systemctl start "$SERVICE" 2>/dev/null
+    # --- 2. the daemon must be running ---------------------------------------
+    if [ "$daemon_up" != "active" ]; then
+        alert daemon-down "$SERVICE is $daemon_up -- starting it. Nothing imports CDRs while it is down."
+        systemctl start "$SERVICE" 2>/dev/null
+    fi
+else
+    # Cron-only box. Never start a daemon here -- that would CREATE the race.
+    if [ "$daemon_up" = "active" ]; then
+        alert daemon-on-cron-box \
+            "$SERVICE is active on a cron-driven box. That is two importers on one spool, which is \
+exactly the 2026-09-24 failure. NOT stopping it automatically -- decide which one this box should \
+run, then disable the other."
+    fi
+    # More than one concurrent cron importer is the same race. Keep the oldest.
+    if [ "${#cron_importers[@]}" -gt 1 ]; then
+        keep=$(ps -o pid= --sort=start_time -p "${cron_importers[*]}" 2>/dev/null | head -1 | tr -d ' ')
+        alert concurrent-cron-importers \
+            "${#cron_importers[@]} copies of xml_cdr_import.php running at once (pids: ${cron_importers[*]}). \
+They share one spool with no lock, so they take the same files and raise duplicate keys, which abort \
+the transaction and discard whole batches. Keeping $keep, killing the rest. Fix the crontab: one \
+entry, wrapped in flock."
+        for p in "${cron_importers[@]}"; do
+            [ "$p" = "$keep" ] && continue
+            kill -9 "$p" 2>/dev/null; killed=$((killed+1))
+        done
+        log "killed $killed duplicate cron importer(s), kept $keep"
+    fi
 fi
 
 # --- 3. failed/sql ------------------------------------------------------------
@@ -121,4 +155,4 @@ for b in xml size; do
     [ "$c" -gt 0 ] && alert "failed-$b" "$c file(s) in failed/$b -- these do not replay on their own."
 done
 
-log "ok spool=$spool failed_sql=$failed_sql daemon=$daemon_up importers_killed=${#cron_importers[@]}"
+log "ok mode=$MODE spool=$spool failed_sql=$failed_sql daemon=$daemon_up importers=${#cron_importers[@]} killed=$killed"
