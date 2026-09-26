@@ -66,10 +66,20 @@ def _load_conf(path="/etc/fusionpbx/caption.conf"):
 
 
 _CFG = _load_conf()
+# No defaults for the secrets. DB_PASS and XI_KEY were literals here until
+# 2026-09-26, which put the live CCL database password and a billable
+# ElevenLabs key in a public repo for nine weeks. Absent config must stop the
+# worker, not quietly fall back to a committed credential.
+for _req in ("DB_PASS", "XI_KEY"):
+    if not _CFG.get(_req):
+        raise SystemExit(
+            "caption-stream-worker: %s is not set in /etc/fusionpbx/caption.conf"
+            % _req)
+
 DB_DSN = "host=%s dbname=%s user=%s password=%s" % (
     _CFG.get("DB_HOST", "127.0.0.1"), _CFG.get("DB_NAME", "fusionpbx"),
-    _CFG.get("DB_USER", "fusionpbx"), _CFG.get("DB_PASS", "Takay1takaane"))
-XI_KEY = _CFG.get("XI_KEY", "sk_7d78907af456db3a031a893334fc328b23563d790de8ef6f")
+    _CFG.get("DB_USER", "fusionpbx"), _CFG["DB_PASS"])
+XI_KEY = _CFG["XI_KEY"]
 
 WS_BASE = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
 STT_MODEL = _CFG.get("STT_MODEL", "scribe_v2_realtime")

@@ -14,10 +14,21 @@
 
 if (php_sapi_name() !== 'cli') { http_response_code(403); exit; }
 
-const DB_DSN  = 'pgsql:host=127.0.0.1;dbname=fusionpbx';
-const DB_USER = 'fusionpbx';
-const DB_PASS = 'Takay1takaane';
-const XI_KEY  = 'sk_7d78907af456db3a031a893334fc328b23563d790de8ef6f';
+// Read from /etc/fusionpbx/caption.conf (KEY=value; see caption.conf.example).
+// DB_PASS and XI_KEY were hardcoded here until 2026-09-26 and leaked publicly
+// for nine weeks. No defaults for the secrets -- refuse to start without them.
+$__cfg = @parse_ini_file('/etc/fusionpbx/caption.conf') ?: array();
+foreach (array('DB_PASS', 'XI_KEY') as $__req) {
+    if (empty($__cfg[$__req])) {
+        fwrite(STDERR, "caption-worker: $__req is not set in /etc/fusionpbx/caption.conf\n");
+        exit(1);
+    }
+}
+define('DB_DSN',  'pgsql:host=' . ($__cfg['DB_HOST'] ?? '127.0.0.1')
+                . ';dbname=' . ($__cfg['DB_NAME'] ?? 'fusionpbx'));
+define('DB_USER', $__cfg['DB_USER'] ?? 'fusionpbx');
+define('DB_PASS', $__cfg['DB_PASS']);
+define('XI_KEY',  $__cfg['XI_KEY']);
 
 // STT backend: 'scribe' (ElevenLabs) | 'whisper' (self-hosted Bangla fine-tune on .98)
 // Benchmarked 2026-07-23 on real call audio: scribe = full words + punctuation +

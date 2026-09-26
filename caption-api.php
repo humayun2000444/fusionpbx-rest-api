@@ -25,11 +25,20 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') { http_response_code(204);
 // Per-server settings: /etc/fusionpbx/caption.conf overrides these defaults
 // (plain KEY=value lines — see caption.conf.example / DEPLOY-CAPTIONS.md).
 $__cfg = @parse_ini_file('/etc/fusionpbx/caption.conf') ?: array();
-define('CAP_KEY', $__cfg['CAP_KEY'] ?? 'cap_ccl_f31b9d2c7a55');
+// No fallback. These were literals here until 2026-09-26, which put a live
+// CAP_KEY and database password in a public repo for nine weeks. Missing config
+// must fail loudly, not silently authenticate with a committed secret.
+foreach (array('CAP_KEY', 'DB_PASS') as $__req) {
+    if (empty($__cfg[$__req])) {
+        respond(array('ok' => false,
+            'error' => $__req . ' is not set in /etc/fusionpbx/caption.conf'), 500);
+    }
+}
+define('CAP_KEY', $__cfg['CAP_KEY']);
 define('DB_DSN', 'pgsql:host=' . ($__cfg['DB_HOST'] ?? '127.0.0.1')
     . ';dbname=' . ($__cfg['DB_NAME'] ?? 'fusionpbx'));
 define('DB_USER', $__cfg['DB_USER'] ?? 'fusionpbx');
-define('DB_PASS', $__cfg['DB_PASS'] ?? 'Takay1takaane');
+define('DB_PASS', $__cfg['DB_PASS']);
 define('REC_DIR', $__cfg['REC_DIR'] ?? '/var/lib/freeswitch/recordings/captions');
 
 function respond($arr, $code = 200) {
