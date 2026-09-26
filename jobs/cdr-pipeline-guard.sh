@@ -67,7 +67,34 @@ fi
 [ -n "${IMPORTER_MODE:-}" ] && MODE="$IMPORTER_MODE"
 
 daemon_up=$(systemctl is-active "$SERVICE" 2>/dev/null || echo inactive)
-mapfile -t cron_importers < <(pgrep -f 'xml_cdr_import\.php' 2>/dev/null)
+
+# Only the PHP process itself counts as an importer.
+#
+# pgrep -f 'xml_cdr_import\.php' matches the whole chain a single cron tick
+# produces -- cron's "sh -c", the flock wrapper, and php -- because the script
+# path appears in all three command lines. It also matches any shell that merely
+# mentions the name, this script's own callers included. Counting those made one
+# legitimate invocation look like three concurrent importers, and the cron-mode
+# branch below then "kept the oldest" (the sh wrapper) and killed the real php.
+# It did that every five minutes on CCL until 2026-09-26.
+#
+# So: filter to processes whose argv[0] is the interpreter.
+importers_now() {
+    local pid cmd first
+    for pid in $(pgrep -f 'xml_cdr_import\.php' 2>/dev/null); do
+        [ -r "/proc/$pid/cmdline" ] || continue
+        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+        case "$cmd" in
+            *xml_cdr_import.php*) : ;;
+            *) continue ;;
+        esac
+        first=${cmd%% *}
+        case "${first##*/}" in
+            php|php[0-9]*) echo "$pid" ;;
+        esac
+    done
+}
+mapfile -t cron_importers < <(importers_now)
 killed=0
 
 # --- 1. exactly one importer -------------------------------------------------
