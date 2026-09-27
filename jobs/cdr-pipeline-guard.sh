@@ -107,7 +107,16 @@ This is what corrupted CDR reporting on 2026-09-24: both importers take the same
 the loser raises a duplicate key, the transaction aborts and the whole batch is discarded \
 into failed/sql. Killing it. Check for a re-added cron entry -- www-data's crontab is chattr +i +a."
         for p in "${cron_importers[@]}"; do kill -9 "$p" 2>/dev/null; killed=$((killed+1)); done
-        pkill -9 -f 'flock -n /tmp/xml_cdr_import.lock' 2>/dev/null
+        # Same discipline as importers_now(): match the flock binary itself, not
+        # any process whose command line happens to mention the lock path -- a
+        # grep or an editor would qualify under a bare pkill -f.
+        for _p in $(pgrep -f 'xml_cdr_import\.lock' 2>/dev/null); do
+            [ -r "/proc/$_p/cmdline" ] || continue
+            _c=$(tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null)
+            case "${_c%% *}" in
+                */flock|flock) kill -9 "$_p" 2>/dev/null ;;
+            esac
+        done
         log "killed $killed stray importer process(es)"
     fi
 
