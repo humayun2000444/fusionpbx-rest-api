@@ -10,7 +10,8 @@
  * Request body:
  *   domain_uuid     (required) tenant
  *   phone           (required) customer number to call
- *   order_id        (required) order reference
+ *   reference       (optional) order/appointment/invoice reference;
+ *                   aliases: ref, order_id, orderId
  *   customer_name   (optional) used in the greeting
  *   language        (optional) 'en' | 'bn'   (default: domain config)
  *   confirm_url     (optional) override the domain default callback URL
@@ -20,7 +21,16 @@
 
 require_once __DIR__ . '/order-confirm-helper.php';
 
-$required_params = array("phone", "order_id");
+// Only the phone is genuinely required.
+//
+// This said array("phone", "order_id") until 2026-09-28, which made the four
+// aliases below unreachable: rest.php checks required_params against the RAW
+// body before do_action runs, so a caller sending "reference" -- the neutral
+// name this action documents and the one the UI guide tells people to use --
+// was rejected with missing_parameters:["order_id"] before the alias mapping
+// ever executed. The reference is also genuinely optional: an appointment
+// reminder or a delivery notice has nothing to put in it.
+$required_params = array("phone");
 
 function do_action($body) {
     global $domain_uuid;
@@ -36,8 +46,12 @@ function do_action($body) {
                 (isset($body->order_id) ? trim($body->order_id) :
                 (isset($body->orderId) ? trim($body->orderId) : null)));
 
-    if (empty($db_domain_uuid) || empty($phone) || empty($order_id)) {
-        return array("success" => false, "error" => "domain_uuid, phone and reference (order_id) are required");
+    // order_id stays NOT NULL in the table, so absent becomes '' rather than null.
+    // A template that references {reference} simply renders it empty; a tenant
+    // with no reference concept edits the clause out of their template.
+    if ($order_id === null) { $order_id = ''; }
+    if (empty($db_domain_uuid) || empty($phone)) {
+        return array("success" => false, "error" => "domain_uuid and phone are required");
     }
 
     // Recipient name: recipient/contact (neutral) or customer_name (legacy).
