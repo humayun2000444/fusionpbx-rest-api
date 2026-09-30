@@ -6,6 +6,10 @@ known, so the node count for 1000 PBXs can be calculated instead of guessed.
 Every step is independent and reversible. Do them in order — each one makes the
 next safer — and re-run **Step 0** between steps so you can attribute the change.
 
+**Step 4 changed on 2026-09-30:** moving PostgreSQL to an sbc1 LXC was declined, so
+Step 4 is now the memory problem that move was going to solve, and the database
+exposure it would have closed is its own Step 5.
+
 Nothing here has been applied. Measurements are from 2026-09-30 ~19:00 (+06).
 
 ---
@@ -131,22 +135,26 @@ sysctl -w vm.vfs_cache_pressure=50
 echo -e 'vm.swappiness = 10\nvm.vfs_cache_pressure = 50' >/etc/sysctl.d/99-pbx-vm.conf
 ```
 
-> **Do not run `swapoff -a` on this box yet.** It forces all 1.8 GB back into RAM, and
-> there are 289 MB free. It will OOM and the OOM killer's most attractive target is the
-> 3.7 GB FreeSWITCH process. Only consider it *after* Step 4 has freed the memory.
+> **Do not run `swapoff -a` on this box.** It forces all 1.8 GB back into RAM, and there
+> are ~300 MB free. It will OOM, and the OOM killer's most attractive target is the
+> 3.7 GB FreeSWITCH process. It stays unsafe until Step 4 creates real headroom.
 
 **Verify:** swap-out should stop growing. `si`/`so` in `vmstat 1 5` should read 0.
-Existing swap will not come back on its own — that is expected, and Step 4 fixes it.
+
+This lowers the *rate* of new paging; it does not reclaim the 1.8 GB already out, and
+nothing here will, because the process that would have freed it is no longer being
+moved. Step 4 is what actually fixes the shortage.
 
 **Rollback:** `sysctl -w vm.swappiness=60`, delete the file.
 
 ---
 
-## Step 3 — shrink the database before moving it
+## Step 3 — shrink the database
 
-**Why.** 166 GB, and nearly all of it is CDR. Trimming first turns a multi-hour
-migration into a short one, and cuts what sbc1 has to hold. Growth is ~6.6 GB/day, so
-this is worth doing regardless of the move.
+**Why.** 166 GB, and nearly all of it is CDR, growing ~6.6 GB/day. With the database
+staying on this box (Step 4), every gigabyte of it competes with FreeSWITCH for the same
+RAM and the same disk. This was originally about shortening a migration; now it is one of
+the few ways to give memory back without buying any.
 
 Existing tooling on the box: `/usr/local/sbin/trim-cdr-side-tables.sh`, with indexes
 already in place from migration `20260928-dashboard-and-trim-indexes.sql`.
@@ -170,98 +178,81 @@ customer is owed (`exported_at`).
 
 ---
 
-## Step 4 — move PostgreSQL to an LXC on sbc1
+## Step 4 — memory headroom, with PostgreSQL staying put
 
-**Why.** Postgres is 22.7% CPU, ~46 processes on a run queue of 59, and the single
-biggest claim on 12 GB of RAM. Moving it is what actually ends the swapping.
+**Decision (user, 2026-09-30): the Postgres-to-sbc1-LXC move is skipped.** Recorded here
+with its reasoning so it is not re-proposed blind, and so what it was solving does not
+get lost with it.
 
-**The catch, measured:** `ip route get 192.168.24.101` → `via 114.130.145.81 dev enp1s0`.
-sbc1 is reached over the *same* NIC that Step 1 addresses. There is no separate storage
-LAN. 273 tx/s is small against the SIP load so this should still net out positive — but
-**do Step 1 first**. Latency today: 0.316 ms avg, max 1.95 ms, 0% loss over 20 packets.
+*Why it was proposed:* Postgres is 22.7% CPU, ~46 processes on a run queue of 59, and the
+largest claim on 12 GB of RAM. Moving it was the most direct way to end the swapping.
+*Why it was declined:* it puts the database and the SBC in one failure domain, and sbc1
+is reached over the same saturated `enp1s0` that Step 1 addresses.
 
-**Confirm before starting** (no access from here — `telcobright`, `root` and `ubuntu`
-were all refused on 192.168.24.101):
+**What that leaves unsolved.** The box has ~300 MB free with 1.8 GB already swapped, and
+FreeSWITCH alone is 3.7 GB RSS. Paging a realtime SIP process is the leading explanation
+for the 15-second silent calls. Step 2 stops it getting worse; it cannot give the memory
+back. Without the move, there are three levers, and only the first is decisive.
 
-- cores and RAM free on sbc1 after the existing MySQL / TelcoREST containers
-- disk ≥ trimmed DB size + 6.6 GB/day, on the LXC's storage pool
-- a static 192.168.24.x for the container
-- accepted: this puts the database and the SBC in one failure domain. If sbc1 dies you
-  lose call routing *and* the database. If that is not acceptable, the LXC belongs on
-  different hardware — the rest of this step is unchanged either way.
+### 4a. Add RAM to the VM — the actual fix
 
-**Good news:** the primary is already replication-ready, so no restart is needed:
+12 GB is not enough for FreeSWITCH plus PostgreSQL plus a 166 GB database plus nginx and
+php-fpm. 24 GB would give the page cache room to do its job and take the swap pressure
+off; 32 GB leaves headroom for growth. Hypervisor change, needs a VM restart unless
+memory hotplug is already configured.
 
-```
-wal_level = replica      max_wal_senders = 10
-hot_standby = on         max_replication_slots = 10
-```
+**Verify:** `free -m` shows real free memory; `vmstat` `si`/`so` stay at 0 under load.
+Only once there is genuine headroom does `swapoff -a && swapon -a` become safe — and that
+is the step that finally clears the 1.8 GB.
 
-### 4a. On the primary (114.130.145.82)
-
-```bash
-sudo -u postgres psql -c "create role replicator with replication login password '<strong>';"
-sudo -u postgres psql -c "select pg_create_physical_replication_slot('sbc1_pg');"
-# allow only the new container
-echo "host replication replicator 192.168.24.<LXC>/32 scram-sha-256" >> /etc/postgresql/16/main/pg_hba.conf
-systemctl reload postgresql          # reload, not restart
-```
-
-### 4b. In the LXC (PostgreSQL 16 — must match 16.x)
+### 4b. Right-size PostgreSQL's connection headroom
 
 ```bash
-systemctl stop postgresql
-rm -rf /var/lib/postgresql/16/main/*
-sudo -u postgres pg_basebackup \
-  -h 114.130.145.82 -U replicator -D /var/lib/postgresql/16/main \
-  -Fp -Xs -P -R -S sbc1_pg
-systemctl start postgresql
+psql -c "show max_connections;"   # currently 500, with 45 actually active
 ```
 
-`-R` writes `standby.signal` and `primary_conninfo` for you.
+pgbouncer already pools in front on `127.0.0.1:6432`, so 500 backends is headroom that
+cannot be used and each one reserves memory. Dropping it to ~150 is safe with pgbouncer
+in place and returns memory for nothing. `shared_buffers` (1 GB) and `work_mem` (4 MB)
+are already conservative — leave them alone.
 
-### 4c. Wait for catch-up — do not cut over before this is near zero
+**Verify:** the portal and FreeSWITCH keep working under load; `pg_stat_activity` count
+stays well under the new limit. **Rollback:** raise it back and restart Postgres.
 
-```bash
-# on the primary
-sudo -u postgres psql -c "select client_addr, state,
-  pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) as lag
-  from pg_stat_replication;"
-```
+### 4c. Step 3 matters more now
 
-### 4d. Cutover (seconds, in a quiet window)
-
-```bash
-systemctl stop freeswitch nginx php8.3-fpm     # stop writers on the PBX
-# confirm lag is 0, then on the LXC:
-sudo -u postgres pg_ctl promote -D /var/lib/postgresql/16/main
-# on the PBX, repoint FusionPBX and pgbouncer:
-sed -i 's/^database.0.host.*/database.0.host = 192.168.24.<LXC>/' /etc/fusionpbx/config.conf
-#   also update pgbouncer's [databases] host, then:
-systemctl restart pgbouncer && systemctl start php8.3-fpm nginx freeswitch
-```
-
-**Verify:**
-
-```bash
-fs_cli -x "status"                  # FreeSWITCH up, taking calls
-psql -h 192.168.24.<LXC> -U fusionpbx -d fusionpbx -c "select count(*) from v_domains;"
-free -m                             # free RAM should jump; swap stops growing
-```
-Then place a real test call and re-run Step 0.
-
-**Rollback:** the old primary still holds the data. Point `config.conf` and pgbouncer
-back at `127.0.0.1`, restart, and you are where you started — **as long as you do it
-before writes accumulate on the new primary**. After that, rolling back means
-replicating in the other direction. Decide the point of no return in advance.
-
-**Afterwards:** `listen_addresses` is `*` and port 5432 is open to the internet. Once
-the move is done, bind the new primary to the 192.168.24.x interface only and firewall
-5432 to the PBX. Do not carry the exposure across.
+With the database staying on the PBX, trimming CDR is no longer just about shrinking a
+migration — it directly reduces Postgres's working set and its IO on the same spindles
+FreeSWITCH is using. Do not skip it.
 
 ---
 
-## Step 5 — the CDR write path (decide, do not pre-commit)
+## Step 5 — close the PostgreSQL exposure
+
+This was originally folded into the move. It stands on its own now, and it does not
+depend on anything else in this runbook.
+
+```bash
+psql -c "show listen_addresses;"      # currently: *
+ss -lntp | grep 5432                  # currently: 0.0.0.0:5432 and [::]:5432
+```
+
+The database is listening on every interface, on a box with a public IP. FusionPBX and
+pgbouncer both reach it over loopback, so nothing local needs the public binding.
+
+```bash
+# /etc/postgresql/16/main/postgresql.conf
+listen_addresses = 'localhost'
+```
+
+**Verify:** `ss -lntp | grep 5432` shows only `127.0.0.1`; the portal still loads and
+`fs_cli -x "status"` still reports healthy. **Rollback:** restore the previous value and
+restart. If anything genuinely needs remote access, bind that interface specifically and
+firewall the port to known sources rather than reverting to `*`.
+
+---
+
+## Step 6 — the CDR write path (decide, do not pre-commit)
 
 **Correction:** `mod_odbc_cdr` is **not available** on this box. `/usr/lib/freeswitch/mod/`
 has only `mod_cdr_csv`, `mod_cdr_sqlite` and `mod_xml_cdr`, and `apt-cache policy
@@ -292,7 +283,7 @@ If it is still behind afterwards, in order of preference:
 
 ---
 
-## Step 6 — find the real ceiling, then size for 1000
+## Step 7 — find the real ceiling, then size for 1000
 
 With Steps 1–4 in place, measure what one node actually sustains rather than estimating:
 
@@ -319,3 +310,5 @@ whole node's worth of capacity on its own.
   for months, silently. If it is ever revisited, it goes in per-domain and guarded.
 - **Throttling or blocking innoversal-345.** They are a customer; the platform is being
   sized for the load rather than shedding it.
+- **Moving PostgreSQL to sbc1.** Declined — see Step 4 for the reasoning on both sides,
+  and for what has to happen instead now that it is off the table.
