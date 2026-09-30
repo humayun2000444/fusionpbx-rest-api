@@ -71,7 +71,11 @@ function do_action($body) {
                 "uuid" => $d['dialplan_detail_uuid'],
                 "tag" => $d['dialplan_detail_tag'],
                 "type" => $d['dialplan_detail_type'],
-                "data" => $d['dialplan_detail_data']
+                "data" => $d['dialplan_detail_data'],
+                // Same marker as time-condition-list.php: group 999 is the
+                // default route, however it happens to be tagged.
+                "isAntiAction" => $d['dialplan_detail_tag'] === 'anti-action'
+                    || (int) $g === 999
             );
         }
     }

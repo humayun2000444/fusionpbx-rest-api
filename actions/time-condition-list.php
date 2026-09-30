@@ -80,7 +80,12 @@ function parse_condition_summary($details) {
                 $entry['actions'][] = array(
                     "type" => $item['dialplan_detail_type'],
                     "data" => $item['dialplan_detail_data'],
+                    // Group 999 is how FusionPBX marks the default / after-hours
+                    // route, and it is written as a plain action - see the note
+                    // in time-condition-create.php. The tag is still checked so
+                    // rows written before that change keep reporting correctly.
                     "isAntiAction" => $item['dialplan_detail_tag'] === 'anti-action'
+                        || (int) $group_id === 999
                 );
             }
         }
