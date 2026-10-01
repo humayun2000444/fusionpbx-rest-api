@@ -1,0 +1,50 @@
+--- a/app/xml_cdr/resources/service/xml_cdr.php
++++ b/app/xml_cdr/resources/service/xml_cdr.php
+@@ -177,15 +177,39 @@
+ 		}
+ 
+ 		//process the call detail records
+ 		if (!empty($xml_cdr_array)) {
+-			//make sure the database connection is available
+-			while (!$database->is_connected()) {
+-				//connect to the database
+-				$database->connect();
+-
+-				//sleep for a moment
+-				sleep(3);
+-			}
++			// Make sure the database connection is available.
++			//
++			// Bounded on purpose. This was an unbounded
++			//   while (!$database->is_connected()) { connect(); sleep(3); }
++			// and a supervised process that never exits cannot be restarted by
++			// its supervisor. On 2026-10-01 this service sat "active (running)"
++			// for 10 hours having burned 26 seconds of CPU, holding no socket and
++			// importing nothing, while 324,000 files piled up behind it. systemd
++			// saw a healthy unit the whole time, because the process was still
++			// there - asleep. The CDR table was 617 minutes behind before anyone
++			// noticed.
++			//
++			// Failing fast hands the problem to Restart=always, which is the only
++			// thing here that can actually fix it.
++			$db_attempts = 0;
++			while (!$database->is_connected()) {
++				if ($db_attempts >= 10) {
++					error_log('xml_cdr: no database connection after '.$db_attempts
++						.' attempts - exiting so systemd can restart this service');
++					exit(1);
++				}
++				$db_attempts++;
++
++				//connect to the database
++				$database->connect();
++				if ($database->is_connected()) {
++					break;
++				}
++
++				//sleep for a moment
++				sleep(3);
++			}
+ 
+ 			// Drop files whose CDR is already in the database before any of them
+ 			// reach a transaction.

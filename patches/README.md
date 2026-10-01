@@ -75,3 +75,40 @@ replaying already-imported files is what feeds the cascade.
 Note this was not the whole story — see
 `migrations/20260924-cdr-admin-query-performance.sql`. The importer was also
 being starved of disk I/O by un-indexed CDR page queries seq scanning 11 GB.
+
+## xml_cdr-service-db-reconnect.patch
+
+`app/xml_cdr/resources/service/xml_cdr.php`. **Not yet applied anywhere.**
+
+The service guarded its batch with an unbounded reconnect:
+
+    while (!$database->is_connected()) {
+        $database->connect();
+        sleep(3);
+    }
+
+A supervised process that never exits cannot be restarted by its supervisor. On
+2026-10-01 the BTCL service sat `active (running)` for 10 hours having used
+26.7s of CPU, holding no TCP socket and no Postgres backend, while the spool
+grew to 324,941 files. The CDR table was **617 minutes** behind. `Restart=always`
+is set on the unit and never fired, because the process was still there, asleep.
+Postgres and pgbouncer were healthy throughout - a test connect returned
+instantly - so whatever blip broke it had long passed and the loop simply could
+not climb out.
+
+The patch bounds it at 10 attempts (~30s), then `exit(1)` and lets systemd
+restart the unit. It also breaks out as soon as `connect()` succeeds rather than
+always sleeping 3s first.
+
+Apply and restart:
+
+    patch -p1 --dry-run < patches/xml_cdr-service-db-reconnect.patch
+    patch -p1 < patches/xml_cdr-service-db-reconnect.patch
+    systemctl restart xml_cdr
+
+Also worth adding to the unit, since `StartLimitIntervalSec=0` disables start
+rate limiting: `RestartSec=10`, so a genuinely unreachable database produces a
+restart every ~40s instead of a tight loop.
+
+Verified by applying to a copy of the live file: hunk applies (fuzz 1), `php -l`
+clean, resulting region reviewed.

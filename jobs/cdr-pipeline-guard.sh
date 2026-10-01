@@ -185,7 +185,42 @@ if [ "$spool" -gt "$SPOOL_WARN" ]; then
 reports will be incomplete until it drains. Check load, and that only one importer is running."
 fi
 
-# --- 5. buckets that need a human --------------------------------------------
+# --- 5. liveness: an "active" daemon that is importing nothing ----------------
+# systemd only knows whether the process still exists. On 2026-10-01 it existed
+# and slept for 10 hours inside an unbounded database-reconnect loop while the
+# spool grew to 324,000 files - and every check above reported healthy the whole
+# time ("daemon=active importers=0"), with spool-depth alerting into the void.
+# The CDR table ended up 617 minutes behind before a human noticed.
+#
+# The signal that catches it is CPU time: an importer with files in front of it
+# always burns some. Zero ticks across a whole interval, with work waiting, means
+# asleep rather than slow.
+CPU_STATE=/var/run/cdr-pipeline-guard.cpu
+if [ "$MODE" = daemon ] && [ "$daemon_up" = active ] && [ "$spool" -gt 0 ]; then
+    svc_pid=$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null)
+    if [ -n "$svc_pid" ] && [ "$svc_pid" != 0 ] && [ -r "/proc/$svc_pid/stat" ]; then
+        # fields 14 and 15 of /proc/<pid>/stat are utime and stime, in clock ticks
+        ticks=$(awk '{print $14+$15}' "/proc/$svc_pid/stat" 2>/dev/null)
+        prev_pid=""; prev_ticks=""
+        if [ -r "$CPU_STATE" ]; then read -r prev_pid prev_ticks < "$CPU_STATE" || true; fi
+        echo "$svc_pid $ticks" > "$CPU_STATE"
+
+        if [ -n "$prev_ticks" ] && [ "$prev_pid" = "$svc_pid" ] && [ "$prev_ticks" = "$ticks" ]; then
+            alert daemon-wedged \
+                "$SERVICE (pid $svc_pid) has used NO cpu since the last check while $spool \
+files wait. It is asleep, not slow -- restarting it. If this keeps happening, the bounded \
+reconnect patch is missing: see rest_api patches/xml_cdr-service-db-reconnect.patch."
+            if systemctl restart "$SERVICE"; then
+                log "restarted $SERVICE (wedged: 0 cpu with $spool files queued)"
+                rm -f "$CPU_STATE"
+            else
+                log "FAILED to restart $SERVICE"
+            fi
+        fi
+    fi
+fi
+
+# --- 6. buckets that need a human --------------------------------------------
 for b in xml size; do
     c=$(ls -U "$D/failed/$b" 2>/dev/null | wc -l)
     [ "$c" -gt 0 ] && alert "failed-$b" "$c file(s) in failed/$b -- these do not replay on their own."
