@@ -44,8 +44,14 @@ Not recorded, on purpose:
 
 ## Deploy (on CCL, from the rest_api checkout)
 
+Bring in **only this folder**. Do not `git pull`: on 2026-10-06 the CCL
+checkout was 53 commits behind with 7 locally modified files, and a pull would
+put every one of those unrelated changes live on CCL's REST API at once.
+
 ```
-cd /var/www/fusionpbx/app/rest_api && git pull
+cd /var/www/fusionpbx/app/rest_api
+git fetch origin
+git checkout origin/master -- services/video-call-cdr   # touches nothing else
 cd services/video-call-cdr
 sudo ./deploy.sh install            # receiver + sweep timer; Janus untouched
 sudo ./deploy.sh test               # 39 checks incl. a rolled-back DB insert
