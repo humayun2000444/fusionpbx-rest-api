@@ -1,0 +1,21 @@
+# Receives Janus VideoCall events and writes one FusionPBX CDR per video call.
+# Installed by deploy.sh, which replaces @DIR@ with this directory's path.
+[Unit]
+Description=Video call CDR receiver (Janus VideoCall events -> v_xml_cdr)
+After=network.target postgresql.service
+
+[Service]
+User=www-data
+Group=www-data
+StateDirectory=video-call-cdr
+StateDirectoryMode=0750
+WorkingDirectory=@DIR@
+# Built-in server, localhost only: Janus on this box is the only client.
+ExecStart=/usr/bin/php -S 127.0.0.1:7099 @DIR@/receiver.php
+Restart=always
+RestartSec=5
+# The built-in server logs every request; keep only what the receiver says.
+LogFilterPatterns=~(Accepted|Closing|\[200\]: )
+
+[Install]
+WantedBy=multi-user.target

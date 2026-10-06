@@ -1,0 +1,14 @@
+; /etc/video-call-cdr.conf  (0640 root:www-data) - deploy.sh writes this on first install.
+
+; Janus Admin API. deploy.sh enable-janus binds it to 127.0.0.1 only and sets
+; the same secret in janus.jcfg (general.admin_secret).
+admin_url = http://127.0.0.1:7088/admin
+admin_secret = CHANGE_ME
+
+; enforce: a caller is only believed when the same Janus session holds a SIP
+;          handle registered as that extension (FreeSWITCH checked its password).
+; log:     record anyway, just log the mismatch.
+identity_check = enforce
+
+state_file = /var/lib/video-call-cdr/state.json
+fusionpbx_config = /etc/fusionpbx/config.conf

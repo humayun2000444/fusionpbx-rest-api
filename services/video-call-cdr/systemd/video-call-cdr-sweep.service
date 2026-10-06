@@ -1,0 +1,11 @@
+# Closes video calls whose handles vanished without an event, retries unwritten CDRs.
+[Unit]
+Description=Video call CDR sweep
+
+[Service]
+Type=oneshot
+User=www-data
+Group=www-data
+StateDirectory=video-call-cdr
+StateDirectoryMode=0750
+ExecStart=/usr/bin/php @DIR@/sweep.php
