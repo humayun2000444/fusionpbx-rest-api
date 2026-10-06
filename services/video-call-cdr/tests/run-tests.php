@@ -370,7 +370,7 @@ if (in_array('--db', $argv, true)) {
         check('row inserted', is_array($row), implode(' | ', $logs));
         if ($row) {
             echo '        ' . json_encode($row) . "\n";
-            check('billsec 22, duration 28, waitsec 6', $row['billsec'] == 22 && $row['duration'] == 28 && $row['waitsec'] == 6);
+            check('billsec 22, duration 22 (FusionPBX: duration = billsec), waitsec 6', $row['billsec'] == 22 && $row['duration'] == 22 && $row['waitsec'] == 6);
             check('extension resolved', $row['has_ext'] === true || $row['has_ext'] === 't');
             check('filed under the callee, like FusionPBX', $row['filed_under'] === $to, (string) $row['filed_under']);
             check('marked as video', $row['last_app'] === 'videocall' && $row['last_arg'] === 'video VP8');

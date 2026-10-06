@@ -86,8 +86,11 @@ final class CdrWriter
                 ':start_epoch' => $start,
                 ':answer_epoch' => $answer,
                 ':end_epoch' => $end,
-                ':duration' => $end - $start,
-                ':mduration' => intdiv($cdr['end_us'] - $cdr['start_us'], 1000),
+                // FusionPBX stores talk time in duration too (xml_cdr.php:
+                // duration = billsec, mduration = billmsec) - true for every
+                // FreeSWITCH row on CCL. Ring time goes in waitsec.
+                ':duration' => $answered ? $end - $answer : 0,
+                ':mduration' => $answered ? intdiv($cdr['end_us'] - $cdr['answer_us'], 1000) : 0,
                 ':billsec' => $answered ? $end - $answer : 0,
                 ':billmsec' => $answered ? intdiv($cdr['end_us'] - $cdr['answer_us'], 1000) : 0,
                 ':waitsec' => $answered ? $answer - $start : null,
