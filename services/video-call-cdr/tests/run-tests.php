@@ -24,10 +24,18 @@ final class FakeJanus
 {
     public $handles = [];   // "s:h" => ['plugin' => ..., 'ps' => [...]]
 
+    /** As janus_sip reports it on CCL: username is the bare user part, identity the full URI. */
     public function sipUser($s, $h, $user, $status = 'registered')
     {
         $this->handles["$s:$h"] = ['plugin' => VideoCallCdr::SIP_PLUGIN,
-            'ps' => ['username' => "sip:$user", 'registration_status' => $status]];
+            'ps' => ['username' => explode('@', $user)[0], 'identity' => "sip:$user", 'registration_status' => $status]];
+    }
+
+    /** The softphone's call-waiting helper: a second SIP handle with no identity of its own. */
+    public function sipHelper($s, $h, $user)
+    {
+        $this->handles["$s:$h"] = ['plugin' => VideoCallCdr::SIP_PLUGIN,
+            'ps' => ['username' => explode('@', $user)[0], 'identity' => null, 'registration_status' => 'disabled', 'helper' => true]];
     }
 
     public function videoUser($s, $h, $user)
@@ -93,6 +101,7 @@ function at($seconds) { return T + (int) ($seconds * 1000000); }
 function world()
 {
     $j = new FakeJanus();
+    $j->sipHelper('100', '3', '1234@tb.com');
     $j->sipUser('100', '1', '1234@tb.com');
     $j->videoUser('100', '2', '1234@tb.com');
     $j->sipUser('200', '1', '1235@tb.com');
@@ -260,6 +269,15 @@ list($rows) = run($j, [
     [ev('100', '2', at(5), 'hangup', ['reason' => 'Explicit hangup'])],
 ]);
 check('enforce: SIP handle not registered -> not recorded', count($rows) === 0);
+$j = new FakeJanus();
+$j->videoUser('100', '2', '1234@tb.com'); $j->videoUser('200', '2', '1235@tb.com');
+$j->sipHelper('100', '3', '1234@tb.com');   // only the helper, no real registration
+list($rows) = run($j, [
+    function () use ($j) { $j->link('100:2', '200:2'); },
+    [ev('100', '2', at(1), 'calling')],
+    [ev('100', '2', at(5), 'hangup', ['reason' => 'Explicit hangup'])],
+]);
+check('enforce: a helper handle alone does not vouch', count($rows) === 0);
 $j = world();
 $j->sipUser('100', '1', '9999@tb.com');
 $st = null;

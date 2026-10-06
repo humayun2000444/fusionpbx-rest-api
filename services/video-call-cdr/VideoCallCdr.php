@@ -319,9 +319,13 @@ final class VideoCallCdr
             $info = $resp['info'] ?? [];
             if (($info['plugin'] ?? '') !== self::SIP_PLUGIN) continue;
             $ps = $info['plugin_specific'] ?? [];
-            list($sipUser, $sipHost) = self::splitUser(preg_replace('/^sips?:/i', '', (string) ($ps['username'] ?? '')));
+            // "identity" is the full SIP URI (sip:103@callcenter.cosmocom.net);
+            // "username" is only the user part ("103"), so it cannot tell two
+            // domains apart.
+            $identity = (string) ($ps['identity'] ?? '');
+            list($sipUser, $sipHost) = self::splitUser(preg_replace('/^sips?:/i', '', $identity));
             $reg = (string) ($ps['registration_status'] ?? '');
-            $seen[] = ($ps['username'] ?? '?') . " ($reg)";
+            $seen[] = ($identity ?: '?') . " ($reg)";
             if ($sipUser === $user && $sipHost === $domain && $reg === 'registered') {
                 return [true, ''];
             }
