@@ -55,6 +55,12 @@ final class CdrWriter
                 $this->say("skip {$cdr['caller']}: extension $callerExt not in $domain");
                 return true;
             }
+            $x->execute([':d' => $domainUuid, ':e' => $calleeExt]);
+            $callee = $x->fetch(PDO::FETCH_ASSOC);
+            if (!$callee) {
+                $this->say("skip {$cdr['caller']} -> {$cdr['callee']}: extension $calleeExt not in $domain");
+                return true;
+            }
 
             $start = intdiv($cdr['start_us'], 1000000);
             $end = intdiv($cdr['end_us'], 1000000);
@@ -67,7 +73,12 @@ final class CdrWriter
                 ':uuid' => $cdr['xml_cdr_uuid'],
                 ':domain_uuid' => $domainUuid,
                 ':domain_name' => $domain,
-                ':extension_uuid' => $ext['extension_uuid'],
+                // FusionPBX files an extension-to-extension call under the
+                // extension that was CALLED - every 1234 -> 1235 audio call on
+                // tb.com belongs to 1235 - and the softphone's call history
+                // lists rows by extension_uuid. Filed under the caller, a video
+                // call never showed up as incoming for the callee.
+                ':extension_uuid' => $callee['extension_uuid'],
                 ':sip_call_id' => $cdr['sip_call_id'],
                 ':caller_id_name' => trim((string) $ext['effective_caller_id_name']) !== '' ? $ext['effective_caller_id_name'] : $callerExt,
                 ':caller_id_number' => $callerExt,

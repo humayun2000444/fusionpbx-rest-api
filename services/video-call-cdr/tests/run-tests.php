@@ -361,7 +361,8 @@ if (in_array('--db', $argv, true)) {
             'status' => 'answered', 'hangup_cause' => 'NORMAL_CLEARING', 'hangup_cause_q850' => 16,
             'missed_call' => false, 'sip_hangup_disposition' => 'recv_bye',
         ]);
-        $row = $pdo->query("SELECT domain_name, extension_uuid IS NOT NULL AS has_ext, direction, caller_id_number,
+        $row = $pdo->query("SELECT domain_name, extension_uuid IS NOT NULL AS has_ext,
+                (SELECT extension FROM v_extensions e WHERE e.extension_uuid = v_xml_cdr.extension_uuid) AS filed_under, direction, caller_id_number,
                 destination_number, billsec, duration, waitsec, status, missed_call, hangup_cause, read_codec,
                 last_app, last_arg, start_stamp, answer_stamp, end_stamp
               FROM v_xml_cdr WHERE xml_cdr_uuid = " . $pdo->quote($uuid))->fetch(PDO::FETCH_ASSOC);
@@ -371,6 +372,7 @@ if (in_array('--db', $argv, true)) {
             echo '        ' . json_encode($row) . "\n";
             check('billsec 22, duration 28, waitsec 6', $row['billsec'] == 22 && $row['duration'] == 28 && $row['waitsec'] == 6);
             check('extension resolved', $row['has_ext'] === true || $row['has_ext'] === 't');
+            check('filed under the callee, like FusionPBX', $row['filed_under'] === $to, (string) $row['filed_under']);
             check('marked as video', $row['last_app'] === 'videocall' && $row['last_arg'] === 'video VP8');
         }
         $again = $writer([
