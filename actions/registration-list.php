@@ -1,6 +1,44 @@
 <?php
 $required_params = array();
 
+/**
+ * LAN IP and IP for one registration, exactly as FusionPBX's own Registrations
+ * page works them out (app/registrations/resources/classes/registrations.php),
+ * so this API and the GUI always show the same thing.
+ *
+ * Webphones register through Janus, so network-ip is always Janus's address.
+ * The CCL webphone puts the agent's real addresses in the Contact: real= is the
+ * LAN IP (FusionPBX already reads that, as it does for Snom phones) and pub= the
+ * public IP, which replaces network-ip when present.
+ */
+function registration_ips($row) {
+    $contact = $row['contact'] ?? '';
+    $network_ip = $row['network-ip'] ?? '';
+    if (preg_match('/;pub=(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?=[;>]|$)/', $contact, $pub_match)) {
+        $network_ip = $pub_match[1];
+    }
+
+    $lan_ip = '';
+    $call_id_array = explode('@', $row['call-id'] ?? '');
+    if (isset($call_id_array[1])) {
+        $agent = $row['agent'] ?? '';
+        $lan_ip = $call_id_array[1];
+        if (!empty($agent) && (false !== stripos($agent, 'grandstream') || false !== stripos($agent, 'ooma'))) {
+            $lan_ip = str_ireplace(
+                array('A','B','C','D','E','F','G','H','I','J'),
+                array('0','1','2','3','4','5','6','7','8','9'),
+                $lan_ip);
+        } elseif (!empty($agent) && 1 === preg_match('/\ACL750A/', $agent)) {
+            $lan_ip = preg_replace('/_/', '.', $lan_ip);
+        }
+    } elseif (preg_match('/real=\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/', $contact, $ip_match)) {
+        $lan_ip = str_replace('real=', '', $ip_match[0]);
+    } elseif (preg_match('/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/', $contact, $ip_match)) {
+        $lan_ip = preg_replace('/_/', '.', $ip_match[0]);
+    }
+    return array($lan_ip, $network_ip);
+}
+
 function do_action($body) {
     // Get profile filter if provided
     $profile_filter = isset($body->profile) ? $body->profile : 'all';
@@ -95,25 +133,8 @@ function do_action($body) {
                     }
                 }
 
-                // Get LAN IP
-                $lan_ip = '';
-                $call_id_array = explode('@', $row['call-id'] ?? '');
-                if (isset($call_id_array[1])) {
-                    $agent = $row['agent'] ?? '';
-                    $lan_ip = $call_id_array[1];
-                    if (!empty($agent) && (false !== stripos($agent, 'grandstream') || false !== stripos($agent, 'ooma'))) {
-                        $lan_ip = str_ireplace(
-                            array('A','B','C','D','E','F','G','H','I','J'),
-                            array('0','1','2','3','4','5','6','7','8','9'),
-                            $lan_ip);
-                    } elseif (!empty($agent) && 1 === preg_match('/\ACL750A/', $agent)) {
-                        $lan_ip = preg_replace('/_/', '.', $lan_ip);
-                    }
-                } elseif (preg_match('/real=\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/', $row['contact'] ?? '', $ip_match)) {
-                    $lan_ip = str_replace('real=', '', $ip_match[0]);
-                } elseif (preg_match('/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/', $row['contact'] ?? '', $ip_match)) {
-                    $lan_ip = preg_replace('/_/', '.', $ip_match[0]);
-                }
+                // LAN IP and IP, as the FusionPBX GUI shows them
+                list($lan_ip, $network_ip) = registration_ips($row);
 
                 // Parse status to get expiry info
                 $status = $row['status'] ?? '';
@@ -129,7 +150,7 @@ function do_action($body) {
                     'sip_auth_realm' => $realm,
                     'agent' => $row['agent'] ?? '',
                     'host' => $row['host'] ?? '',
-                    'network_ip' => $row['network-ip'] ?? '',
+                    'network_ip' => $network_ip,
                     'network_port' => $row['network-port'] ?? '',
                     'lan_ip' => $lan_ip,
                     'mwi_account' => $row['mwi-account'] ?? '',
@@ -206,14 +227,11 @@ function get_registrations_via_cli($sip_profiles, $domain_filter, $show) {
                     }
                 }
 
-                // Get LAN IP
-                $lan_ip = '';
-                $call_id_array = explode('@', $row['call-id'] ?? '');
-                if (isset($call_id_array[1])) {
-                    $lan_ip = $call_id_array[1];
-                } elseif (preg_match('/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/', $row['contact'] ?? '', $ip_match)) {
-                    $lan_ip = $ip_match[0];
-                }
+                // LAN IP and IP, as the FusionPBX GUI shows them. This path used
+                // to skip the GUI's real= and phone-specific rules, so list-all
+                // (the admin dashboard) showed Janus's address as every
+                // webphone's LAN IP.
+                list($lan_ip, $network_ip) = registration_ips($row);
 
                 // Build registration record
                 $registrations[$id] = array(
@@ -224,7 +242,7 @@ function get_registrations_via_cli($sip_profiles, $domain_filter, $show) {
                     'sip_auth_realm' => $realm,
                     'agent' => $row['agent'] ?? '',
                     'host' => $row['host'] ?? '',
-                    'network_ip' => $row['network-ip'] ?? '',
+                    'network_ip' => $network_ip,
                     'network_port' => $row['network-port'] ?? '',
                     'lan_ip' => $lan_ip,
                     'mwi_account' => $row['mwi-account'] ?? '',
