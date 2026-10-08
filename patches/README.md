@@ -112,3 +112,33 @@ restart every ~40s instead of a tight loop.
 
 Verified by applying to a copy of the live file: hunk applies (fuzz 1), `php -l`
 clean, resulting region reviewed.
+
+## database-pgbouncer-emulate-prepares.patch
+
+`resources/classes/database.php`, for **BTCL** (FusionPBX talks to Postgres through
+pgbouncer on 127.0.0.1:6432, pool_mode = transaction, since 2026-09-20 11:03).
+
+PDO creates a server-side prepared statement per query and drops it with
+`DEALLOCATE pdo_stmt_000000NN`. pgbouncer renames prepared statements, so the
+DEALLOCATE fails ("prepared statement ... does not exist", ~200,000 a day). Outside
+a transaction that is noise; inside one it aborts the transaction. FusionPBX's
+`delete()` runs BEGIN / DELETE / COMMIT, discards a statement in between, and its
+`execute()` swallows the error - so the delete rolls back while the page and
+`v_database_transactions` both say "OK". Found 2026-10-08: removing members from
+ring group 6789 (pbx-manager) "saved" but the members stayed. Postgres log:
+
+    DEALLOCATE pdo_stmt_00000002  -> ERROR does not exist
+    delete from v_ring_group_destinations ...  -> current transaction is aborted
+
+The patch sets `PDO::ATTR_EMULATE_PREPARES` on the pgsql connection: PDO builds
+the statement client-side, so there is nothing for pgbouncer to rename and no
+DEALLOCATE. Verified on BTCL with the same BEGIN/discard/DELETE sequence (rolled
+back): without it the DELETE errors, with it the DELETE removes the row.
+
+Apply on BTCL (back up first, then watch the Postgres log - the "does not exist"
+errors should stop):
+
+    cp -a resources/classes/database.php resources/classes/database.php.bak-$(date +%Y%m%d-%H%M%S)
+    patch -p1 --dry-run < .../patches/database-pgbouncer-emulate-prepares.patch
+    patch -p1 < .../patches/database-pgbouncer-emulate-prepares.patch
+    systemctl reload php8.3-fpm

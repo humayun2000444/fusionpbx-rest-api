@@ -1,0 +1,15 @@
+diff --git a/resources/classes/database.php b/resources/classes/database.php
+index 53925cd3c..8a2ea6a4f 100644
+--- a/resources/classes/database.php
++++ b/resources/classes/database.php
+@@ -601,6 +601,10 @@
+ 						else {
+ 							$this->db = new PDO("pgsql:dbname=$this->db_name user=$this->username password=$this->password");
+ 						}
++						//build statements client-side: behind pgbouncer (transaction pooling) the server-side
++						//prepared statements PDO names and DEALLOCATEs by name do not exist, the failing
++						//DEALLOCATE aborts the open transaction and every delete() then rolls back silently
++						$this->db->setAttribute(PDO::ATTR_EMULATE_PREPARES, true);
+ 					}
+ 					catch (PDOException $e) {
+ 						$message['message'] = $e->getMessage();
