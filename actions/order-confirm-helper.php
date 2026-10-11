@@ -347,7 +347,11 @@ function oc_generate_tts($config, $text, $language, $force_lang_code = null, $fo
     // sole selector, so no stored/injected voice id can override it.
     $el_voice = '';
     if ($provider === 'elevenlabs') {
-        $el_voice = (strtoupper($gender) === 'MALE') ? 'Gubgw9l4dtIoQA9YZHgx' : 'RABOvaPec1ymXz02oDQi';
+        // FEMALE = "Anika - Clear, Warm and Professional" (jUjRbhZWoMK4aDciW36V):
+        // the voice that read Bangla, digits included, correctly in ElevenLabs'
+        // own studio with Eleven v3 + Bengali (2026-10-11). It replaced "Anika -
+        // Sweet, Lively and Warm" (RABOvaPec1ymXz02oDQi). MALE = Brian.
+        $el_voice = (strtoupper($gender) === 'MALE') ? 'Gubgw9l4dtIoQA9YZHgx' : 'jUjRbhZWoMK4aDciW36V';
     }
 
     $audio_dir = '/usr/share/freeswitch/sounds/custom/order_confirm/';
