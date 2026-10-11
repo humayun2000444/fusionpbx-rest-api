@@ -86,7 +86,7 @@ function oc_get_config($database, $domain_uuid) {
             'tts_provider' => 'google', 'speech_rate' => 'slow', 'answer_delay_ms' => 2000,
             'tts_google_key' => '', 'tts_azure_key' => '', 'tts_azure_region' => 'southeastasia',
             'tts_elevenlabs_key' => '', 'tts_elevenlabs_voice_id' => '',
-            'tts_elevenlabs_model' => 'eleven_multilingual_v2', 'tts_elevenlabs_language' => '',
+            'tts_elevenlabs_model' => 'eleven_v3', 'tts_elevenlabs_language' => '',
             'tts_openai_key' => '', 'tts_openai_voice' => 'nova',
             'ack_text_en' => 'Thank you, your response has been recorded.',
             'ack_text_bn' => 'ধন্যবাদ, আপনার উত্তর গ্রহণ করা হয়েছে।',

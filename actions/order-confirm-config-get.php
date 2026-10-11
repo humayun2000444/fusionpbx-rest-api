@@ -69,7 +69,7 @@ function do_action($body) {
             "ttsAzureRegion"       => isset($c['tts_azure_region']) ? $c['tts_azure_region'] : 'southeastasia',
             "ttsElevenlabsKey"     => isset($c['tts_elevenlabs_key']) ? $c['tts_elevenlabs_key'] : '',
             "ttsElevenlabsVoiceId" => isset($c['tts_elevenlabs_voice_id']) ? $c['tts_elevenlabs_voice_id'] : '',
-            "ttsElevenlabsModel"   => isset($c['tts_elevenlabs_model']) ? $c['tts_elevenlabs_model'] : 'eleven_multilingual_v2',
+            "ttsElevenlabsModel"   => isset($c['tts_elevenlabs_model']) ? $c['tts_elevenlabs_model'] : 'eleven_v3',
             "ttsElevenlabsLanguage"=> isset($c['tts_elevenlabs_language']) ? $c['tts_elevenlabs_language'] : '',
             "ttsOpenaiKey"         => isset($c['tts_openai_key']) ? $c['tts_openai_key'] : '',
             "ttsOpenaiVoice"       => isset($c['tts_openai_voice']) ? $c['tts_openai_voice'] : 'nova',
