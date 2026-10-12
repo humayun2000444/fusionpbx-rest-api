@@ -140,7 +140,11 @@ function do_action($body) {
                 $value = null;
             }
 
-            $updates[] = "$db_field = :$db_field";
+            // Keyed by COLUMN: callers send both spellings (broadcastName and
+            // broadcast_name — the CRM gateway adds the snake_case twin of every
+            // field), and listing the column twice made PostgreSQL refuse the
+            // whole update: "multiple assignments to same column".
+            $updates[$db_field] = "$db_field = :$db_field";
             $parameters[$db_field] = $value;
         }
     }
