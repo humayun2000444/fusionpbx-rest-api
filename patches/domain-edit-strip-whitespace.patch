@@ -1,0 +1,12 @@
+--- a/core/domains/domain_edit.php
++++ b/core/domains/domain_edit.php
+@@ -67,7 +67,8 @@
+ 
+ //get http post variables and set them to php variables
+ 	if (!empty($_POST)) {
+-		$domain_name = strtolower($_POST["domain_name"]);
++		//a domain name never contains whitespace: save() trims v_domains, but the rename cascade below uses this value raw
++		$domain_name = strtolower(preg_replace('/[\s\x{00A0}\x{200B}-\x{200D}\x{2060}\x{FEFF}]+/u', '', (string) ($_POST["domain_name"] ?? '')) ?? '');
+ 		$domain_enabled = $_POST["domain_enabled"] ?? 'false';
+ 		$domain_description = $_POST["domain_description"];
+ 	}

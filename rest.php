@@ -55,6 +55,20 @@ unset($parameters);
 
 $body = json_decode(file_get_contents('php://input'));
 
+// domain names and contexts never contain whitespace; strip pasted tabs/NBSPs before SQL, XML or a cache key sees them
+if ($body instanceof stdClass) {
+	$ws = '[\s\x{00A0}\x{200B}-\x{200D}\x{2060}\x{FEFF}]';
+	foreach (array('domain_name', 'domainName', 'domain', 'context', 'dialplan_context', 'destination_context', 'user_context', 'userContext', 'from_domain', 'realm') as $key) {
+		if (isset($body->$key) && is_string($body->$key)) {
+			$body->$key = preg_replace('/'.$ws.'+/u', '', $body->$key) ?? $body->$key;
+		}
+	}
+	if (isset($body->accountcode) && is_string($body->accountcode)) {
+		$body->accountcode = preg_replace('/^'.$ws.'+|'.$ws.'+$/u', '', $body->accountcode) ?? $body->accountcode;
+	}
+	unset($ws, $key);
+}
+
 $validation_errors = ensure_parameters($body, array("action"));
 if($validation_errors) {
 	return_error($validation_errors, 400);

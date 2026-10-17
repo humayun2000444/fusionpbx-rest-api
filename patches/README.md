@@ -142,3 +142,44 @@ errors should stop):
     patch -p1 --dry-run < .../patches/database-pgbouncer-emulate-prepares.patch
     patch -p1 < .../patches/database-pgbouncer-emulate-prepares.patch
     systemctl reload php8.3-fpm
+
+## domain-edit-strip-whitespace.patch
+
+`core/domains/domain_edit.php`, for **BTCL and CCL** (the patched line and its
+context are identical on both; verified with `patch --dry-run` against each).
+
+The page reads the name as `strtolower($_POST["domain_name"])`, so a TAB pasted in
+front of it survives. `database::save()` trims every value, which leaves the
+`v_domains` row clean and the domain list looking right. A rename, however, then
+runs raw `replace(column, old, new)` UPDATEs with the untrimmed value across
+`v_dialplans` (context and XML), `v_dialplan_details`, `v_destinations`,
+`v_extensions` (user_context, accountcode, dial_domain), IVRs, ring groups and more.
+
+Found 2026-10-17 on BTCL `pbx.rio.1400.alaapcloud.gov.bd` (Rio Travels), renamed in
+the GUI from `pbx-rio-1400.alaapcloud.gov.bd` at 06:58 UTC by `admin` from
+123.49.48.198 (`v_database_transactions` has the before/after). All 45 dialplan
+contexts, `conf-xfer@<TAB>…`, and both extensions' user_context and accountcode
+became `\tpbx.rio.1400…`. FreeSWITCH's XML parser turns a TAB inside an attribute
+into a space, and the dialplan lookup is an exact match on the context, so the
+tenant's own routes never loaded. Every outbound call fell through to the global
+`is_secure` dialplan (`last_app eval / not_secure`, `send_refuse`, gateway
+CallsOUT 0) while inbound still worked. Leftovers to recognise it by: cache files
+named `dialplan. <domain>` / `directory.<ext>@ <domain>` (space, from the parser).
+
+The same missing trim lets the *add* path skip its duplicate check
+(`lower(domain_name) = :domain_name` is run with the raw value) before `save()`
+stores a second domain under an existing name.
+
+The patch strips every whitespace character from the posted name, including NBSP,
+zero-width space and BOM; malformed UTF-8 becomes empty, which the page already
+rejects as "name required". Two more layers cover the other writers:
+`rest.php` strips the same identifier fields at the API boundary, and
+`migrations/20261017-identifier-whitespace-guard.sql` puts a trigger on every table
+that stores a domain name or a context (GUI, rest_api, TelcoREST over JPA, manual SQL).
+
+Apply from `/var/www/fusionpbx` on each box, then reload the php-fpm that nginx
+uses (php8.3-fpm on BTCL):
+
+    cp -a core/domains/domain_edit.php core/domains/domain_edit.php.bak-$(date +%Y%m%d-%H%M%S)
+    patch -p1 --dry-run < app/rest_api/patches/domain-edit-strip-whitespace.patch
+    patch -p1 < app/rest_api/patches/domain-edit-strip-whitespace.patch
