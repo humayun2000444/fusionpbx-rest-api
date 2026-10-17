@@ -178,8 +178,11 @@ rejects as "name required". Two more layers cover the other writers:
 that stores a domain name or a context (GUI, rest_api, TelcoREST over JPA, manual SQL).
 
 Apply from `/var/www/fusionpbx` on each box, then reload the php-fpm that nginx
-uses (php8.3-fpm on BTCL):
+uses (php8.3-fpm on both). Keep the backup outside the web root - a `.bak` next to
+the file can be fetched through nginx as plain source:
 
-    cp -a core/domains/domain_edit.php core/domains/domain_edit.php.bak-$(date +%Y%m%d-%H%M%S)
+    b=/var/backups/fusionpbx-patches/$(date +%Y%m%d-%H%M%S); mkdir -p $b
+    cp -a core/domains/domain_edit.php $b/
     patch -p1 --dry-run < app/rest_api/patches/domain-edit-strip-whitespace.patch
     patch -p1 < app/rest_api/patches/domain-edit-strip-whitespace.patch
+    chown www-data:www-data core/domains/domain_edit.php
