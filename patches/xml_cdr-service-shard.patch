@@ -1,0 +1,56 @@
+--- a/app/xml_cdr/resources/service/xml_cdr.php	2026-10-22 21:46:04
++++ b/app/xml_cdr/resources/service/xml_cdr.php	2026-10-22 21:50:36
+@@ -33,9 +33,40 @@
+ 		$hostname = gethostname();
+ 	}
+ 
+-//define the process id file
+-	$pid_file = "/var/run/fusionpbx/".basename( $argv[0], ".php") .".pid";
++//shard the import across several processes
++	//
++	// One importer cannot keep up on a busy box. On BTCL (2026-10-22) diallers
++	// produced up to ~200,000 CDRs an hour from 09:00, and with the CPU ~91% busy
++	// this single process imported only ~58,000 an hour. The spool reached 1.16
++	// million files by 21:00 and reports were up to twelve hours short until it
++	// drained overnight.
++	//
++	// Run N copies with shard=0..N-1 and shards=N (rest_api jobs/xml_cdr-shards/).
++	// Each takes only the files whose name hashes to its own slot, so no file is
++	// ever seen by two importers -- two importers on one spool is what discarded
++	// whole batches into failed/sql on 2026-09-24. With no arguments this is the
++	// original single importer, taking every file.
++	$shards = 1;
++	$shard = 0;
++	if (isset($_GET['shards']) && ctype_digit((string) $_GET['shards'])) {
++		$shards = max(1, min(16, (int) $_GET['shards']));
++	}
++	if (isset($_GET['shard'])) {
++		//a bad shard number must not quietly become 0 and double up shard 0's files
++		if (!ctype_digit((string) $_GET['shard'])) {
++			echo "xml_cdr: invalid shard '".$_GET['shard']."' - exiting\n";
++			exit(0);
++		}
++		$shard = (int) $_GET['shard'];
++	}
++	if ($shard >= $shards) {
++		echo "xml_cdr: shard {$shard} is not used when shards={$shards} - exiting\n";
++		exit(0);
++	}
+ 
++//define the process id file (shard 0 keeps the original name)
++	$pid_file = "/var/run/fusionpbx/".basename( $argv[0], ".php").($shard > 0 ? "-".$shard : "").".pid";
++
+ //function to check if the process exists
+ 	function process_exists($file = false) {
+ 
+@@ -168,6 +199,10 @@
+ 				if (substr($entry, -8) !== '.cdr.xml') {
+ 					continue;
+ 				}
++				//another shard owns this file
++				if ($shards > 1 && crc32($entry) % $shards !== $shard) {
++					continue;
++				}
+ 				$xml_cdr_array[] = $xml_cdr_dir . '/' . $entry;
+ 				if (count($xml_cdr_array) >= 100) {
+ 					break;

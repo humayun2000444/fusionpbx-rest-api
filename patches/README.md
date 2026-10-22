@@ -186,3 +186,17 @@ the file can be fetched through nginx as plain source:
     patch -p1 --dry-run < app/rest_api/patches/domain-edit-strip-whitespace.patch
     patch -p1 < app/rest_api/patches/domain-edit-strip-whitespace.patch
     chown www-data:www-data core/domains/domain_edit.php
+
+## xml_cdr-service-shard.patch
+
+`app/xml_cdr/resources/service/xml_cdr.php`, for **BTCL** (daemon importer).
+Generated against the live file, which already carries the readdir/dedupe and
+db-reconnect patches above. Apply those first.
+
+Adds `shard=K&shards=N`: the importer only takes spool files where
+`crc32(name) % N == K`, and shard K>0 gets its own pid file. With no arguments it
+is the original single importer. Installed and driven by
+`jobs/xml_cdr-shards/install.sh N`, which also adds the systemd units. See the
+README there for the numbers: on 2026-10-22 one importer managed ~58,000
+CDRs/hour against ~200,000/hour arriving, so reports ran up to 12 hours behind
+every day.

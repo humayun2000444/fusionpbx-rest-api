@@ -1,0 +1,33 @@
+; /etc/systemd/system/xml_cdr-shard@.service -- installed by install.sh in this folder.
+;
+; Extra CDR importers. xml_cdr.service is shard 0; xml_cdr-shard@1..N-1 take the
+; rest, N = XML_CDR_SHARDS in /etc/default/xml_cdr-shards. Each importer takes
+; only the spool files whose name hashes to its own slot, so no file is ever seen
+; by two importers (patches/xml_cdr-service-shard.patch).
+;
+; WantedBy + PartOf xml_cdr.service: starting, stopping or restarting the main
+; importer does the same to these, so they always run with the same N.
+[Unit]
+Description=FusionPBX xml_cdr importer, shard %i
+After=network.target local-fs.target postgresql.service postgresql@16-main.service pgbouncer.service xml_cdr.service
+Wants=pgbouncer.service
+PartOf=xml_cdr.service
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=/etc/default/xml_cdr-shards
+WorkingDirectory=/var/www/fusionpbx
+ExecStart=/usr/bin/php /var/www/fusionpbx/app/xml_cdr/resources/service/xml_cdr.php shard=%i&shards=${XML_CDR_SHARDS}
+; /run/fusionpbx is shared with the other FusionPBX services - never remove it on stop
+RuntimeDirectory=fusionpbx
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+User=www-data
+Group=www-data
+TimeoutSec=55s
+; a shard outside 1..N-1 exits 0 on purpose and must stay down
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=xml_cdr.service

@@ -14,6 +14,8 @@
 #
 #   1. a second importer            -> KILL IT (this is the bug; never allow two)
 #   2. daemon not running           -> start it
+#   2b. sharded import (jobs/xml_cdr-shards): a shard down -> start it; importers
+#       disagreeing on the shard count -> restart them all together
 #   3. failed/sql piling up         -> replay, but only if the dedupe guard exists
 #   4. spool backing up             -> warn (import is slower than arrival)
 #   5. failed/xml, failed/size      -> warn, needs a human
@@ -32,6 +34,13 @@ STATE=/var/run/cdr-pipeline-guard.state
 SPOOL_WARN=${SPOOL_WARN:-50000}
 FAILED_REPLAY=${FAILED_REPLAY:-500}
 REPLAY_MAX=${REPLAY_MAX:-20000}
+
+# Number of daemon importers (jobs/xml_cdr-shards). 1 = the stock single daemon.
+SHARDS=1
+if [ -r /etc/default/xml_cdr-shards ]; then
+    SHARDS=$(sed -n 's/^XML_CDR_SHARDS=\([0-9][0-9]*\).*/\1/p' /etc/default/xml_cdr-shards | tail -1)
+fi
+[ -n "$SHARDS" ] || SHARDS=1
 
 now() { date -Is; }
 log()   { echo "$(now) $*" >> "$ALERT_LOG"; }
@@ -125,6 +134,52 @@ into failed/sql. Killing it. Check for a re-added cron entry -- www-data's cront
         alert daemon-down "$SERVICE is $daemon_up -- starting it. Nothing imports CDRs while it is down."
         systemctl start "$SERVICE" 2>/dev/null
     fi
+
+    # --- 2b. sharded import ----------------------------------------------------
+    # With XML_CDR_SHARDS=N the daemon runs as N processes: xml_cdr.service is
+    # shard 0 and xml_cdr-shard@1..N-1 take the rest. Each owns the files that
+    # hash to its slot, so they never meet -- but only while every running
+    # importer uses the same N. One started without shards= takes EVERY file,
+    # and next to running shards that is the 2026-09-24 race again. A shard that
+    # is down leaves 1 in N of all CDRs unimported, silently.
+    if [ "$SHARDS" -gt 1 ] && ! grep -q 'another shard owns this file' "$SVC_FILE" 2>/dev/null; then
+        # Fails safe -- the stock importer shares one pid file, so only one of
+        # the N can run -- but the import is back to a single process.
+        alert shard-patch-missing \
+            "XML_CDR_SHARDS=$SHARDS but $SVC_FILE is not shard-aware (a FusionPBX upgrade probably \
+reverted it). Only one importer can run. Re-apply rest_api patches/xml_cdr-service-*.patch and \
+re-run jobs/xml_cdr-shards/install.sh $SHARDS."
+    fi
+    if [ "$daemon_up" = "active" ]; then
+        mismatch=""
+        for _pid in $(pgrep -f 'resources/service/xml_cdr\.php' 2>/dev/null); do
+            [ -r "/proc/$_pid/cmdline" ] || continue
+            _c=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null)
+            _f=${_c%% *}
+            case "${_f##*/}" in php|php[0-9]*) ;; *) continue ;; esac
+            _s=$(grep -o 'shards=[0-9]*' <<< "$_c" | head -1 | cut -d= -f2)
+            [ "${_s:-1}" = "$SHARDS" ] || mismatch="$mismatch $_pid(shards=${_s:-1})"
+        done
+        if [ -n "$mismatch" ]; then
+            alert shard-mismatch \
+                "CDR importers running with a shard count other than XML_CDR_SHARDS=$SHARDS:$mismatch. \
+Importers that disagree on the slot map take the same files (the 2026-09-24 race). \
+Stopping all of them and starting $SERVICE and its shards together."
+            systemctl stop "$SERVICE" 2>/dev/null
+            systemctl stop 'xml_cdr-shard@*' 2>/dev/null
+            systemctl start "$SERVICE" 2>/dev/null
+            log "restarted $SERVICE and its shards (shard-mismatch)"
+        elif [ "$SHARDS" -gt 1 ]; then
+            for i in $(seq 1 $((SHARDS - 1))); do
+                st=$(systemctl is-active "xml_cdr-shard@$i" 2>/dev/null || true)
+                if [ "$st" != "active" ]; then
+                    alert "shard-$i-down" "xml_cdr-shard@$i is ${st:-unknown} -- starting it. \
+1 in $SHARDS CDR files is not imported while it is down."
+                    systemctl start "xml_cdr-shard@$i" 2>/dev/null
+                fi
+            done
+        fi
+    fi
 else
     # Cron-only box. Never start a daemon here -- that would CREATE the race.
     if [ "$daemon_up" = "active" ]; then
@@ -195,29 +250,43 @@ fi
 # The signal that catches it is CPU time: an importer with files in front of it
 # always burns some. Zero ticks across a whole interval, with work waiting, means
 # asleep rather than slow.
+#
+# Every importer is checked when the import is sharded: one asleep shard leaves
+# 1 in N CDRs behind while the others look busy. (An importer whose slice is
+# empty still polls the spool every 100 ms, so it never shows zero ticks.)
 CPU_STATE=/var/run/cdr-pipeline-guard.cpu
 if [ "$MODE" = daemon ] && [ "$daemon_up" = active ] && [ "$spool" -gt 0 ]; then
-    svc_pid=$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null)
-    if [ -n "$svc_pid" ] && [ "$svc_pid" != 0 ] && [ -r "/proc/$svc_pid/stat" ]; then
+    units="$SERVICE"
+    if [ "$SHARDS" -gt 1 ]; then
+        for i in $(seq 1 $((SHARDS - 1))); do units="$units xml_cdr-shard@$i"; done
+    fi
+    for unit in $units; do
+        if [ "$unit" = "$SERVICE" ]; then
+            cpu_state=$CPU_STATE; key=daemon-wedged
+        else
+            cpu_state="$CPU_STATE.${unit#xml_cdr-shard@}"; key="shard-${unit#xml_cdr-shard@}-wedged"
+        fi
+        svc_pid=$(systemctl show -p MainPID --value "$unit" 2>/dev/null)
+        [ -n "$svc_pid" ] && [ "$svc_pid" != 0 ] && [ -r "/proc/$svc_pid/stat" ] || continue
         # fields 14 and 15 of /proc/<pid>/stat are utime and stime, in clock ticks
         ticks=$(awk '{print $14+$15}' "/proc/$svc_pid/stat" 2>/dev/null)
         prev_pid=""; prev_ticks=""
-        if [ -r "$CPU_STATE" ]; then read -r prev_pid prev_ticks < "$CPU_STATE" || true; fi
-        echo "$svc_pid $ticks" > "$CPU_STATE"
+        if [ -r "$cpu_state" ]; then read -r prev_pid prev_ticks < "$cpu_state" || true; fi
+        echo "$svc_pid $ticks" > "$cpu_state"
 
         if [ -n "$prev_ticks" ] && [ "$prev_pid" = "$svc_pid" ] && [ "$prev_ticks" = "$ticks" ]; then
-            alert daemon-wedged \
-                "$SERVICE (pid $svc_pid) has used NO cpu since the last check while $spool \
+            alert "$key" \
+                "$unit (pid $svc_pid) has used NO cpu since the last check while $spool \
 files wait. It is asleep, not slow -- restarting it. If this keeps happening, the bounded \
 reconnect patch is missing: see rest_api patches/xml_cdr-service-db-reconnect.patch."
-            if systemctl restart "$SERVICE"; then
-                log "restarted $SERVICE (wedged: 0 cpu with $spool files queued)"
-                rm -f "$CPU_STATE"
+            if systemctl restart "$unit"; then
+                log "restarted $unit (wedged: 0 cpu with $spool files queued)"
+                rm -f "$cpu_state"
             else
-                log "FAILED to restart $SERVICE"
+                log "FAILED to restart $unit"
             fi
         fi
-    fi
+    done
 fi
 
 # --- 6. buckets that need a human --------------------------------------------
@@ -226,4 +295,4 @@ for b in xml size; do
     [ "$c" -gt 0 ] && alert "failed-$b" "$c file(s) in failed/$b -- these do not replay on their own."
 done
 
-log "ok mode=$MODE spool=$spool failed_sql=$failed_sql daemon=$daemon_up importers=${#cron_importers[@]} killed=$killed"
+log "ok mode=$MODE spool=$spool failed_sql=$failed_sql daemon=$daemon_up shards=$SHARDS importers=${#cron_importers[@]} killed=$killed"
