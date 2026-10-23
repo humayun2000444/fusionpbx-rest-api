@@ -200,3 +200,31 @@ is the original single importer. Installed and driven by
 README there for the numbers: on 2026-10-22 one importer managed ~58,000
 CDRs/hour against ~200,000/hour arriving, so reports ran up to 12 hours behind
 every day.
+
+## xml_cdr-service-sweep.patch
+
+`app/xml_cdr/resources/service/xml_cdr.php`, for **BTCL**. Apply after
+`xml_cdr-service-shard.patch`; `jobs/xml_cdr-shards/install.sh` applies both.
+
+The importer used to `opendir()` on every pass and start again from the first
+entry. readdir returns names in hash order, so files near the end of the
+directory waited behind every newer call. On 2026-10-23, with 4 importers
+keeping up, the oldest waiting file was 13 minutes old while the spool held
+about 2 minutes of calls. It also re-read every empty block in front of the
+files. ext4 never shrinks a directory, so after the 1.2M-file backlog that was
+140 MB per full pass.
+
+Now the directory handle stays open until the sweep reaches the end. Every
+file is reached within one sweep. An importer sleeps 1 s, instead of 100 ms,
+after a whole sweep finds nothing.
+
+Tested against the live file (applies cleanly, `php -l`). One importer with
+arrivals equal to its import rate, 400 passes:
+
+| | max wait (passes) | first 2,000 files still waiting at the end |
+|---|---|---|
+| before | 399 (never served) | 80 |
+| after | 49 (one sweep) | 0 |
+
+4 shards with files arriving throughout: 13,400 created, 13,400 imported
+exactly once, each by its own shard.

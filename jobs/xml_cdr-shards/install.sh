@@ -14,7 +14,7 @@ N=${1:-4}
 HERE=$(cd "$(dirname "$0")" && pwd)
 FPBX=/var/www/fusionpbx
 SVC=app/xml_cdr/resources/service/xml_cdr.php
-PATCH=$HERE/../../patches/xml_cdr-service-shard.patch
+PATCHES=$HERE/../../patches
 ENVF=/etc/default/xml_cdr-shards
 
 [[ $N =~ ^[0-9]+$ ]] && [ "$N" -ge 1 ] && [ "$N" -le 16 ] || { echo "usage: $0 N   (N = 1..16)"; exit 2; }
@@ -26,17 +26,23 @@ ts=$(date +%Y%m%d-%H%M%S)
 B=/var/backups/fusionpbx-patches/$ts
 mkdir -p "$B" && chmod 700 "$B"
 
-# 1. the importer must understand shard= / shards=
-if grep -q 'another shard owns this file' "$FPBX/$SVC"; then
-    echo "importer is already shard-aware"
-else
-    cp -a "$FPBX/$SVC" "$B/"
+# 1. the importer must understand shard= / shards=, and sweep the spool across
+#    passes. Each patch is skipped when the text it adds is already there.
+backed_up=0
+for p in 'another shard owns this file|xml_cdr-service-shard.patch' \
+         'carries on across passes|xml_cdr-service-sweep.patch'; do
+    marker=${p%%|*}; PATCH=$PATCHES/${p#*|}
+    if grep -q "$marker" "$FPBX/$SVC"; then
+        echo "already applied: ${p#*|}"
+        continue
+    fi
+    if [ "$backed_up" = 0 ]; then cp -a "$FPBX/$SVC" "$B/"; backed_up=1; fi
     (cd "$FPBX" && patch -p1 --dry-run -s < "$PATCH" && patch -p1 -s --no-backup-if-mismatch < "$PATCH")
     chown --reference="$B/xml_cdr.php" "$FPBX/$SVC"
     chmod --reference="$B/xml_cdr.php" "$FPBX/$SVC"
     php -l "$FPBX/$SVC" >/dev/null
-    echo "patched $SVC (original kept in $B)"
-fi
+    echo "applied ${p#*|} to $SVC (original kept in $B)"
+done
 
 # 2. units and the shard count
 [ -f "$ENVF" ] && cp -a "$ENVF" "$B/"

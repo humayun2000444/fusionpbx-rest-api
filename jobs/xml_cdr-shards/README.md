@@ -42,6 +42,46 @@ demand on an 8-core box.
 
   **Deploy the updated guard with it**: the old guard only watches `xml_cdr.service`.
 
+- `patches/xml_cdr-service-sweep.patch` keeps each importer's directory handle
+  open across passes, so a sweep carries on where the last pass stopped instead
+  of starting from the top. The import order is readdir's hash order. Restarting
+  from the top let new files near the top jump ahead of older files further
+  down, which could wait 13 minutes. Now every file is reached within one sweep.
+
+## A bloated spool directory: compact-spool-dir.sh
+
+ext4 never shrinks a directory. After the 2026-10-22 backlog (1.2M files)
+the spool stayed **140 MB** on disk while it held about 2,500 files. One full
+read of it took 0.06 s of kernel time, or 0.4 s on the loaded box. Over their
+first 12 hours the importers spent 10x more CPU in the kernel than in PHP,
+reading empty directory blocks.
+
+`compact-spool-dir.sh` swaps in a fresh directory:
+
+1. Pause the guard and stop the importers. FreeSWITCH keeps writing.
+2. Swap a new empty directory into place in one atomic step
+   (`renameat2(RENAME_EXCHANGE)`). Every CDR lands in either the old or the new
+   directory, never in a missing one.
+3. Move the waiting files and `failed/` across. These are renames on the same
+   filesystem.
+4. Start the importers.
+
+The importers are stopped for about 10-30 s. If anything fails, they are started
+again on the way out. It does nothing while the directory is under 8 MB unless
+you pass `--force`.
+
+The guard logs the directory size as `dir_mb=` on every `ok` line. Run the
+script in a quiet hour whenever `dir_mb` is large after a backlog.
+
+    jobs/xml_cdr-shards/compact-spool-dir.sh --dry-run
+    jobs/xml_cdr-shards/compact-spool-dir.sh
+
+Tested on a bloated test spool, with a writer creating a CDR file every 2 ms by
+path as mod_xml_cdr does. No file was lost, `failed/` moved intact, owner and
+mode were kept, the directory went from 3,164 KB to 128 KB, and the guard pause
+was released. When the importers will not stop, it aborts without swapping and
+starts them again.
+
 ## Install / change N / roll back (as root, on the box)
 
     cd /var/www/fusionpbx/app/rest_api && git pull        # or however rest_api is deployed
@@ -51,8 +91,16 @@ demand on an 8-core box.
     jobs/xml_cdr-shards/install.sh 3                     # change N later
     jobs/xml_cdr-shards/rollback.sh                      # back to one importer
 
+To add the sweep patch to a box that already runs shards, deploy the guard first
+(it knows the compaction pause), then re-run `install.sh` with the same N, then
+compact:
+
+    install -m 755 jobs/cdr-pipeline-guard.sh /usr/local/sbin/cdr-pipeline-guard.sh
+    jobs/xml_cdr-shards/install.sh 4                     # applies the sweep patch, restarts the importers
+    jobs/xml_cdr-shards/compact-spool-dir.sh             # once, in a quiet hour
+
 `install.sh` backs up `xml_cdr.php` to `/var/backups/fusionpbx-patches/<ts>/`,
-applies the patch (it skips this if already applied), installs the units, stops
+applies the patches (skipping any already applied), installs the units, stops
 every importer, then starts the new set, and verifies there are exactly N with
 shard 0..N-1. An import cut off by the restart is safe: the dedupe guard drops
 a file whose CDR already committed.

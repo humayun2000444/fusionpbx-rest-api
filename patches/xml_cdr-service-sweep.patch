@@ -1,0 +1,83 @@
+--- a/app/xml_cdr/resources/service/xml_cdr.php
++++ b/app/xml_cdr/resources/service/xml_cdr.php
+@@ -172,6 +172,21 @@
+ //import the call detail records from HTTP POST or file system
+ 	$cdr = new xml_cdr;
+ 
++//the spool directory is read as one sweep that carries on across passes
++	//
++	// Each pass used to opendir() and start again from the first entry. readdir
++	// returns names in hash order, not age order, so files near the top were
++	// taken as soon as they arrived while files near the bottom waited behind
++	// every newer call: on BTCL (2026-10-23) the oldest file was 13 minutes old
++	// while the spool held barely two minutes of calls. Starting from the top
++	// also re-read every empty directory block in front of the files, and ext4
++	// never shrinks a directory -- after the 1.2 million file backlog of
++	// 2026-10-22 that was 140 MB per full pass.
++	//
++	// Keeping the handle open until the sweep reaches the end means every file
++	// is reached within one sweep, and each block is read once per sweep.
++	$dir_handle = false;
++
+ //service loop
+ 	while (true) {
+ 
+@@ -188,14 +203,26 @@
+ 		//
+ 		// readdir stops at 100 matches, so a pass costs the same whether the
+ 		// spool holds a hundred files or a million. Order is no longer sorted by
+-		// name, which is fine -- and closer to oldest-first, since these names
+-		// are uuids and sorting by them was arbitrary anyway. Every file the
+-		// loop touches is unlinked on success or moved under failed/ on error,
+-		// so nothing is read twice.
++		// name, which is fine -- these names are uuids and sorting by them was
++		// arbitrary anyway. (What does matter is that the sweep reaches every
++		// file; see the note above the service loop.) Every file the loop
++		// touches is unlinked on success or moved under failed/ on error, so
++		// nothing is read twice.
+ 		$xml_cdr_array = array();
+-		$dir_handle = opendir($xml_cdr_dir);
++		$sweep_done = false;
++		if ($dir_handle === false) {
++			$dir_handle = opendir($xml_cdr_dir);
++		}
+ 		if ($dir_handle !== false) {
+-			while (($entry = readdir($dir_handle)) !== false) {
++			while (count($xml_cdr_array) < 100) {
++				$entry = readdir($dir_handle);
++				if ($entry === false) {
++					//end of the sweep, the next pass starts a new one
++					closedir($dir_handle);
++					$dir_handle = false;
++					$sweep_done = true;
++					break;
++				}
+ 				if (substr($entry, -8) !== '.cdr.xml') {
+ 					continue;
+ 				}
+@@ -203,12 +230,9 @@
+ 				if ($shards > 1 && crc32($entry) % $shards !== $shard) {
+ 					continue;
+ 				}
+-				$xml_cdr_array[] = $xml_cdr_dir . '/' . $entry;
+-				if (count($xml_cdr_array) >= 100) {
+-					break;
+-				}
++				//keyed by name, so a name listed twice is imported once
++				$xml_cdr_array[$entry] = $xml_cdr_dir . '/' . $entry;
+ 			}
+-			closedir($dir_handle);
+ 		}
+ 
+ 		//process the call detail records
+@@ -340,8 +364,8 @@
+ 			}
+ 		}
+ 
+-		//sleep for 100 ms
+-		usleep(100000);
++		//sleep for 100 ms, or a second when a whole sweep found nothing to do
++		usleep($sweep_done && empty($xml_cdr_array) ? 1000000 : 100000);
+ 
+ 		//debug info
+ 		if (!empty($debug) && $debug_level == '2') {

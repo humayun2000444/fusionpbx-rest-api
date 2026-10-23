@@ -19,6 +19,9 @@
 #   3. failed/sql piling up         -> replay, but only if the dedupe guard exists
 #   4. spool backing up             -> warn (import is slower than arrival)
 #   5. failed/xml, failed/size      -> warn, needs a human
+#   7. spool directory size         -> logged as dir_mb= (compact-spool-dir.sh)
+#
+# It does nothing while compact-spool-dir.sh holds /run/cdr-pipeline-guard.pause.
 #
 # Alerts go to syslog (journald) and ALERT_LOG. State is kept so a continuing
 # problem does not re-alert every five minutes.
@@ -62,6 +65,21 @@ alert() {
 }
 
 touch "$STATE" 2>/dev/null || true
+
+# --- paused for maintenance ----------------------------------------------------
+# jobs/xml_cdr-shards/compact-spool-dir.sh stops every importer for a few
+# seconds while it swaps the spool directory. Starting them in the middle of
+# that would leave them reading the old directory. A pause older than 15
+# minutes is ignored, so a script that died cannot switch the guard off.
+PAUSE=/run/cdr-pipeline-guard.pause
+if [ -f "$PAUSE" ]; then
+    if [ $(( $(date +%s) - $(stat -c %Y "$PAUSE" 2>/dev/null || echo 0) )) -lt 900 ]; then
+        log "paused: $(head -1 "$PAUSE" 2>/dev/null)"
+        exit 0
+    fi
+    alert stale-pause "$PAUSE is older than 15 minutes -- ignoring it and removing it."
+    rm -f "$PAUSE"
+fi
 
 # --- 0. which importer is this box supposed to run? --------------------------
 # BTCL runs the daemon (xml_cdr.service). CCL has no unit file at all and runs
@@ -252,10 +270,21 @@ fi
 # asleep rather than slow.
 #
 # Every importer is checked when the import is sharded: one asleep shard leaves
-# 1 in N CDRs behind while the others look busy. (An importer whose slice is
-# empty still polls the spool every 100 ms, so it never shows zero ticks.)
+# 1 in N CDRs behind while the others look busy.
+#
+# "Work waiting" means a CDR file older than WEDGE_AGE_MIN minutes, not just a
+# non-empty spool. A healthy importer reaches every file within one sweep of
+# the spool, so old files only exist when something is behind. An idle importer
+# polls a small spool once a second and can use less than one tick in five
+# minutes; with a bare spool count it could look wedged at 3 a.m. with two
+# files in another shard's slice.
 CPU_STATE=/var/run/cdr-pipeline-guard.cpu
-if [ "$MODE" = daemon ] && [ "$daemon_up" = active ] && [ "$spool" -gt 0 ]; then
+WEDGE_AGE_MIN=${WEDGE_AGE_MIN:-5}
+waiting_old=""
+if [ "$spool" -gt 0 ]; then
+    waiting_old=$(find "$D" -maxdepth 1 -type f -name '*.cdr.xml' -mmin +"$WEDGE_AGE_MIN" -print -quit 2>/dev/null)
+fi
+if [ "$MODE" = daemon ] && [ "$daemon_up" = active ] && [ -n "$waiting_old" ]; then
     units="$SERVICE"
     if [ "$SHARDS" -gt 1 ]; then
         for i in $(seq 1 $((SHARDS - 1))); do units="$units xml_cdr-shard@$i"; done
@@ -295,4 +324,10 @@ for b in xml size; do
     [ "$c" -gt 0 ] && alert "failed-$b" "$c file(s) in failed/$b -- these do not replay on their own."
 done
 
-log "ok mode=$MODE spool=$spool failed_sql=$failed_sql daemon=$daemon_up shards=$SHARDS importers=${#cron_importers[@]} killed=$killed"
+# --- 7. a bloated spool directory --------------------------------------------
+# ext4 never shrinks a directory. After a big backlog the spool keeps its peak
+# size on disk (140 MB after 2026-10-22), and every sweep reads all of it.
+# Reported here; the fix is jobs/xml_cdr-shards/compact-spool-dir.sh in a quiet hour.
+dir_mb=$(( $(stat -c %s "$D" 2>/dev/null || echo 0) / 1048576 ))
+
+log "ok mode=$MODE spool=$spool failed_sql=$failed_sql daemon=$daemon_up shards=$SHARDS importers=${#cron_importers[@]} killed=$killed dir_mb=$dir_mb"
