@@ -6,6 +6,21 @@ gets a profile of its own, `no-pbx`, on a separate IP:port:
 
 - Every call that arrives on it **parks at once** (`dialplan=inline:park`).
   There is no XML, Lua or database lookup per call.
+- **The parked call has no `Caller-Destination-Number`.** FreeSWITCH's inline
+  dialplan ends by setting `destination_number` to `rdnis`
+  (`mod_dptools.c`), and `rdnis` is empty on an inbound call. The dialled
+  number is still in `variable_sip_req_user` (and `variable_sip_to_user`).
+  - A `${...}` in the profile's `dialplan` cannot put it back. FreeSWITCH
+    rewrites `${` to `%{` when it builds the caller profile
+    (`profile_dup_clean`), so
+    `set_profile_var:destination_number=${sip_req_user}` sets the literal
+    text `%{sip_req_user}`. That was tried on 2026-10-25.
+  - RouteSphere today reads `Caller-Destination-Number` and logged
+    `called=null`.
+  - So either RouteSphere falls back to `variable_sip_req_user`, or
+    `no-pbx-xml-handler.lua` serves a static park extension for context
+    `no-pbx-client`. The second costs one small Lua run per call but no
+    database or FusionPBX lookup.
 - RouteSphere controls the parked call over the **event socket** by UUID:
   answer, play, bridge, transfer, hang up.
 - FusionPBX does not know the profile. It is not in Advanced > SIP Profiles,
@@ -35,11 +50,15 @@ when FreeSWITCH starts or a profile is started or rescanned, never per call.
     jobs/no-pbx/install.sh 10.9.9.18 5070              # files in place, not live yet
     jobs/no-pbx/install.sh 10.9.9.18 5070 --restart    # also restarts FreeSWITCH and checks
 
-mod_lua reads `xml-handler-script` only when FreeSWITCH starts, so the profile
-goes live at the next FreeSWITCH restart. **That restart drops every call on
-the box**, so on a production PBX do it off-hours. `--restart` checks that
-`no-pbx` is RUNNING on the IP:port and that every profile that was running
-before came back.
+mod_lua reads `xml-handler-script` only when FreeSWITCH starts, so the first
+install goes live at the next FreeSWITCH restart. **That restart drops every
+call on the box**, so on a production PBX do it off-hours. `--restart` checks
+that `no-pbx` is RUNNING on the IP:port and that every profile that was
+running before came back.
+
+Later changes to the profile alone do not need a FreeSWITCH restart. When the
+wrapper is already live and `no-pbx` is running, `install.sh … --restart`
+runs `sofia profile no-pbx restart` instead. That drops only no-pbx calls.
 
 Then:
 
@@ -77,9 +96,9 @@ One FreeSWITCH has only one event socket listener.
   `sendmsg <uuid>` to execute an application.
 - The call parks **unanswered** (`Answer-State: ringing`). RouteSphere answers
   it with `uuid_answer`, or rejects it with `uuid_kill`.
-- The dialled number is in `variable_sip_req_user` (also
-  `variable_sip_to_user`). `CHANNEL_PARK` for an inline-parked call has **no
-  `Caller-Destination-Number`**. `Channel-Name` is built from the caller
+- The dialled number is in `variable_sip_req_user`, not in
+  `Caller-Destination-Number` (see above). `Channel-Name` is built from the
+  caller
   (`sofia/no-pbx/<from-user>@<from-host>`), so do not parse the number from
   it. The caller is `Caller-Caller-ID-Number`.
 - To call out on the profile:

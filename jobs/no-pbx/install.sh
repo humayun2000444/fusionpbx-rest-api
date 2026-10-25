@@ -59,6 +59,8 @@ chmod --reference="$SCRIPTS/app.lua" "$SCRIPTS/$OURS"
 echo "handler: $SCRIPTS/$OURS"
 
 #point mod_lua at the wrapper (one line), backing up lua.conf.xml first
+wrapper_was_live=0
+grep -q "name=\"xml-handler-script\" value=\"$OURS\"" "$LUA_CONF" && wrapper_was_live=1
 if grep -q "name=\"xml-handler-script\" value=\"$STOCK\"" "$LUA_CONF"; then
     backup=/var/backups/fusionpbx-patches/$(date +%Y%m%d-%H%M%S)
     mkdir -p "$backup"
@@ -68,17 +70,33 @@ if grep -q "name=\"xml-handler-script\" value=\"$STOCK\"" "$LUA_CONF"; then
 fi
 grep -q "name=\"xml-handler-script\" value=\"$OURS\"" "$LUA_CONF"
 
+profiles() { fs_cli -x 'sofia status' | awk '$2 == "profile" {print $1}' | sort; }
+#the wrapper is already in mod_lua and no-pbx runs: only the profile changed, and restarting that one
+#profile applies it (drops no-pbx calls only, no other call)
+profile_only=0
+[ $wrapper_was_live = 1 ] && profiles | grep -qx no-pbx && profile_only=1
+
 if [ $restart = 0 ]; then
     echo
-    echo "Installed, not live. Restart FreeSWITCH off-hours, it drops every call:  systemctl restart freeswitch"
-    echo "or run this again with --restart."
+    if [ $profile_only = 1 ]; then
+        echo "Profile updated, not live yet. Apply it with:  fs_cli -x 'sofia profile no-pbx restart'"
+        echo "(drops no-pbx calls only), or run this again with --restart."
+    else
+        echo "Installed, not live. Restart FreeSWITCH off-hours, it drops every call:  systemctl restart freeswitch"
+        echo "or run this again with --restart."
+    fi
     exit 0
 fi
 
-profiles() { fs_cli -x 'sofia status' | awk '$2 == "profile" {print $1}' | sort; }
 before=$(profiles)
-echo "restarting FreeSWITCH (profiles now: $(echo $before))"
-systemctl restart freeswitch
+if [ $profile_only = 1 ]; then
+    echo "restarting the no-pbx profile only"
+    fs_cli -x 'sofia profile no-pbx restart'
+    sleep 3
+else
+    echo "restarting FreeSWITCH (profiles now: $(echo $before))"
+    systemctl restart freeswitch
+fi
 for i in $(seq 1 30); do
     fs_cli -x 'sofia status' 2>/dev/null | grep -qE '^[[:space:]]*no-pbx[[:space:]]' && break
     sleep 2

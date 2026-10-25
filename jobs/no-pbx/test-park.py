@@ -139,8 +139,7 @@ def main():
         except socket.timeout:
             break
         fields = event_fields(body)
-        #CHANNEL_PARK for an inline-parked call carries no Caller-Destination-Number, and the channel name is
-        #built from the caller; the dialled user is variable_sip_req_user
+        #the channel name is built from the caller; the dialled user is variable_sip_req_user
         if fields.get("Event-Name") == "CHANNEL_PARK" and fields.get("variable_sip_req_user") == tag:
             park = fields
 
@@ -171,7 +170,10 @@ def main():
 
     ok = (park.get("Caller-Context") == "no-pbx-client"
           and park.get("variable_sofia_profile_name") == "no-pbx"
+          and park.get("variable_sip_req_user") == tag
           and not lookups)
+    #inline:park leaves Caller-Destination-Number empty (README); report it so a fix shows up here
+    print("Caller-Destination-Number: %r (dialled %r)" % (park.get("Caller-Destination-Number"), tag))
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 

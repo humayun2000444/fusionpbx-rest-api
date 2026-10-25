@@ -20,6 +20,10 @@
 		<param name="sip-port" value="{no_pbx_port}"/>
 		<param name="rtp-ip" value="{no_pbx_ip}"/>
 		<param name="context" value="no-pbx-client"/>
+		<!-- FreeSWITCH's inline dialplan ends by setting destination_number to rdnis (mod_dptools.c),
+		     which is empty on an inbound call, so the call parks with no Caller-Destination-Number.
+		     The dialled number stays in variable_sip_req_user. A ${...} in this value cannot restore
+		     it: FreeSWITCH turns ${ into %{ when it builds the caller profile (profile_dup_clean). -->
 		<param name="dialplan" value="inline:park"/>
 		<!-- no digest auth and no registrations, so no directory lookup either -->
 		<param name="auth-calls" value="false"/>
