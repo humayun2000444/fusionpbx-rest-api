@@ -1,0 +1,38 @@
+<!--
+	no-pbx: a SIP listener for RouteSphere calls, outside FusionPBX.
+
+	Every call that arrives here parks at once (dialplan inline:park): no XML, Lua or database lookup
+	per call. RouteSphere controls the parked call over the event socket by UUID, and finds its calls
+	by Caller-Context no-pbx-client.
+
+	no-pbx-xml-handler.lua adds this profile to the sofia.conf that FusionPBX builds. FusionPBX does
+	not know it: it is not in Advanced > SIP Profiles. install.sh fills in {no_pbx_ip} and {no_pbx_port}.
+-->
+<profile name="no-pbx">
+	<aliases>
+	</aliases>
+	<gateways>
+	</gateways>
+	<domains>
+	</domains>
+	<settings>
+		<param name="sip-ip" value="{no_pbx_ip}"/>
+		<param name="sip-port" value="{no_pbx_port}"/>
+		<param name="rtp-ip" value="{no_pbx_ip}"/>
+		<param name="context" value="no-pbx-client"/>
+		<param name="dialplan" value="inline:park"/>
+		<!-- no digest auth and no registrations, so no directory lookup either -->
+		<param name="auth-calls" value="false"/>
+		<param name="disable-register" value="true"/>
+		<param name="manage-presence" value="false"/>
+		<param name="inbound-codec-prefs" value="PCMA,PCMU"/>
+		<param name="outbound-codec-prefs" value="PCMA,PCMU"/>
+		<param name="rtp-timer-name" value="soft"/>
+		<!-- hang up calls whose media has stopped, so a call nobody controls cannot stay parked forever -->
+		<param name="rtp-timeout-sec" value="300"/>
+		<param name="rtp-hold-timeout-sec" value="1800"/>
+		<!-- anyone who can reach sip-ip:sip-port can place a call. To allow only RouteSphere's peers,
+		     create an access control list named no-pbx-peers in Advanced > Access Controls and enable: -->
+		<!-- <param name="apply-inbound-acl" value="no-pbx-peers"/> -->
+	</settings>
+</profile>
