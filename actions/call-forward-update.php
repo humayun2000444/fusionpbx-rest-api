@@ -31,6 +31,7 @@ function do_action($body) {
     $domain_name = $domain ? $domain["domain_name"] : "";
 
     // Build update array
+    $array['extensions'][0]['domain_uuid'] = $ext_domain_uuid;
     $array['extensions'][0]['extension_uuid'] = $extension_uuid;
 
     // Do Not Disturb
@@ -38,76 +39,46 @@ function do_action($body) {
         $array['extensions'][0]['do_not_disturb'] = ($body->do_not_disturb === true || $body->do_not_disturb === "true") ? "true" : "false";
     }
 
-    // Forward All
-    if (isset($body->forward_all_enabled)) {
-        $forward_all_enabled = ($body->forward_all_enabled === true || $body->forward_all_enabled === "true");
-        $forward_all_destination = isset($body->forward_all_destination) ? $body->forward_all_destination : "";
+    // Forward All / Busy / No Answer / User Not Registered. A forward is only
+    // enabled with a destination. Destinations are cleaned the way the GUI's
+    // call_forward_edit.php cleans them: digits and * only.
+    foreach (array('forward_all', 'forward_busy', 'forward_no_answer', 'forward_user_not_registered') as $forward) {
+        $enabled_key = $forward . '_enabled';
+        $destination_key = $forward . '_destination';
+        $destination = isset($body->$destination_key) ? preg_replace('#[^\*0-9]#', '', (string)$body->$destination_key) : "";
 
-        if ($forward_all_enabled && !empty($forward_all_destination)) {
-            $array['extensions'][0]['forward_all_enabled'] = "true";
-            $array['extensions'][0]['forward_all_destination'] = $forward_all_destination;
-        } else {
-            $array['extensions'][0]['forward_all_enabled'] = "false";
+        if (isset($body->$enabled_key)) {
+            $enabled = ($body->$enabled_key === true || $body->$enabled_key === "true");
+            if ($enabled && $destination !== "") {
+                $array['extensions'][0][$enabled_key] = "true";
+                $array['extensions'][0][$destination_key] = $destination;
+            } else {
+                $array['extensions'][0][$enabled_key] = "false";
+            }
+        } elseif (isset($body->$destination_key)) {
+            $array['extensions'][0][$destination_key] = $destination;
         }
     }
-    if (isset($body->forward_all_destination) && !isset($body->forward_all_enabled)) {
-        $array['extensions'][0]['forward_all_destination'] = $body->forward_all_destination;
-    }
 
-    // Forward Busy
-    if (isset($body->forward_busy_enabled)) {
-        $forward_busy_enabled = ($body->forward_busy_enabled === true || $body->forward_busy_enabled === "true");
-        $forward_busy_destination = isset($body->forward_busy_destination) ? $body->forward_busy_destination : "";
+    // save() empties the array it is given; keep what was asked for to check it landed.
+    $requested = $array['extensions'][0];
 
-        if ($forward_busy_enabled && !empty($forward_busy_destination)) {
-            $array['extensions'][0]['forward_busy_enabled'] = "true";
-            $array['extensions'][0]['forward_busy_destination'] = $forward_busy_destination;
-        } else {
-            $array['extensions'][0]['forward_busy_enabled'] = "false";
-        }
-    }
-    if (isset($body->forward_busy_destination) && !isset($body->forward_busy_enabled)) {
-        $array['extensions'][0]['forward_busy_destination'] = $body->forward_busy_destination;
-    }
-
-    // Forward No Answer
-    if (isset($body->forward_no_answer_enabled)) {
-        $forward_no_answer_enabled = ($body->forward_no_answer_enabled === true || $body->forward_no_answer_enabled === "true");
-        $forward_no_answer_destination = isset($body->forward_no_answer_destination) ? $body->forward_no_answer_destination : "";
-
-        if ($forward_no_answer_enabled && !empty($forward_no_answer_destination)) {
-            $array['extensions'][0]['forward_no_answer_enabled'] = "true";
-            $array['extensions'][0]['forward_no_answer_destination'] = $forward_no_answer_destination;
-        } else {
-            $array['extensions'][0]['forward_no_answer_enabled'] = "false";
-        }
-    }
-    if (isset($body->forward_no_answer_destination) && !isset($body->forward_no_answer_enabled)) {
-        $array['extensions'][0]['forward_no_answer_destination'] = $body->forward_no_answer_destination;
-    }
-
-    // Forward User Not Registered
-    if (isset($body->forward_user_not_registered_enabled)) {
-        $forward_user_not_registered_enabled = ($body->forward_user_not_registered_enabled === true || $body->forward_user_not_registered_enabled === "true");
-        $forward_user_not_registered_destination = isset($body->forward_user_not_registered_destination) ? $body->forward_user_not_registered_destination : "";
-
-        if ($forward_user_not_registered_enabled && !empty($forward_user_not_registered_destination)) {
-            $array['extensions'][0]['forward_user_not_registered_enabled'] = "true";
-            $array['extensions'][0]['forward_user_not_registered_destination'] = $forward_user_not_registered_destination;
-        } else {
-            $array['extensions'][0]['forward_user_not_registered_enabled'] = "false";
-        }
-    }
-    if (isset($body->forward_user_not_registered_destination) && !isset($body->forward_user_not_registered_enabled)) {
-        $array['extensions'][0]['forward_user_not_registered_destination'] = $body->forward_user_not_registered_destination;
-    }
+    // save() gates on permission_exists('extension_edit'). There is no logged-in
+    // user over REST, so it refused every update with "Forbidden, does not have
+    // 'extension_edit'" and this action still reported success. The GUI's
+    // call_forward_edit.php grants the same temporary permission around its save.
+    $permission = permissions::new();
+    $permission->add('extension_edit', 'temp');
 
     // Execute update using FusionPBX ORM
     $database = new database;
-    $database->app_name = 'calls';
+    $database->app_name = 'call_forward';
     $database->app_uuid = '19806921-e8ed-dcff-b325-dd3e5da4959d';
     $database->save($array);
+    $save_message = $database->message;
     unset($array);
+
+    $permission->delete('extension_edit', 'temp');
 
     // Clear the cache
     if (class_exists('cache') && !empty($domain_name)) {
@@ -136,6 +107,16 @@ function do_action($body) {
     $parameters = array("extension_uuid" => $extension_uuid);
     $database = new database;
     $updated = $database->select($sql, $parameters, "row");
+
+    // Confirm the values landed, so a refused save cannot be reported as a success.
+    // save() stores an empty string as NULL, hence the string comparison.
+    foreach ($requested as $field => $value) {
+        if (array_key_exists($field, $updated) && (string)$updated[$field] !== (string)$value) {
+            $reason = isset($save_message['message']) ? $save_message['message'] : 'unknown database error';
+            error_log("CALL_FORWARD_UPDATE_ERROR: " . $extension_uuid . ": " . $reason);
+            return array("error" => "Call forward settings were not saved: " . $reason);
+        }
+    }
 
     return array(
         "success" => true,

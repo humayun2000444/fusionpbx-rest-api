@@ -42,6 +42,7 @@ function do_action($body) {
     $domain_name = $domain ? $domain["domain_name"] : "";
 
     // Build update array
+    $array['extensions'][0]['domain_uuid'] = $ext_domain_uuid;
     $array['extensions'][0]['extension_uuid'] = $extension_uuid;
     $array['extensions'][0]['forward_all_enabled'] = $new_enabled;
 
@@ -51,12 +52,37 @@ function do_action($body) {
         $array['extensions'][0]['follow_me_enabled'] = "false";
     }
 
+    // save() empties the array it is given; keep what was asked for to check it landed.
+    $requested = $array['extensions'][0];
+
+    // save() gates on permission_exists('extension_edit') and there is no
+    // logged-in user over REST; without this it refuses the update. Same
+    // temporary grant as the GUI's call_forward_edit.php (see call-forward-update.php).
+    $permission = permissions::new();
+    $permission->add('extension_edit', 'temp');
+
     // Execute update using FusionPBX ORM
     $database = new database;
-    $database->app_name = 'calls';
+    $database->app_name = 'call_forward';
     $database->app_uuid = '19806921-e8ed-dcff-b325-dd3e5da4959d';
     $database->save($array);
+    $save_message = $database->message;
     unset($array);
+
+    $permission->delete('extension_edit', 'temp');
+
+    // Confirm the values landed, so a refused save cannot be reported as a success.
+    unset($requested['domain_uuid'], $requested['extension_uuid']);
+    $sql = "SELECT " . implode(", ", array_keys($requested)) . " FROM v_extensions WHERE extension_uuid = :extension_uuid";
+    $database = new database;
+    $saved = $database->select($sql, array("extension_uuid" => $extension_uuid), "row");
+    foreach ($requested as $field => $value) {
+        if (!is_array($saved) || (string)$saved[$field] !== (string)$value) {
+            $reason = isset($save_message['message']) ? $save_message['message'] : 'unknown database error';
+            error_log("CALL_FORWARD_TOGGLE_FORWARD_ERROR: " . $extension_uuid . ": " . $reason);
+            return array("error" => "Forward All was not changed: " . $reason);
+        }
+    }
 
     // Clear the cache
     if (class_exists('cache') && !empty($domain_name)) {
