@@ -92,20 +92,34 @@ function do_action($body) {
         "app_uuid" => "1d61fb65-1eec-bc73-a6ee-a6203b4fe6f2" // ring group app
     );
 
-    $_SESSION["permissions"]["ring_group_add"] = true;
-    $_SESSION["permissions"]["ring_group_destination_add"] = true;
-    $_SESSION["permissions"]["dialplan_add"] = true;
+    // save() gates on these permissions and there is no logged-in user over REST.
+    // Grant on the permissions singleton (see user-create.php for why not $_SESSION).
+    $granted = array('ring_group_add', 'ring_group_destination_add', 'dialplan_add');
+    $permission = permissions::new();
+    foreach ($granted as $p) {
+        $permission->add($p, 'temp');
+    }
 
     $database = new database;
     $database->app_name = 'rest_api';
     $database->app_uuid = '2bfe71d9-e112-4b8b-bcff-75aeb0e06302';
-    if(!$database->save($array)) {
-        return array("error" => "error adding ring group");
+    $database->save($array);
+    $save_message = $database->message;
+    unset($array);
+
+    foreach ($granted as $p) {
+        $permission->delete($p, 'temp');
     }
 
+    // save()'s return value cannot tell a refusal apart; check the row landed.
     $sql = "SELECT * FROM v_ring_groups WHERE ring_group_uuid = :ring_group_uuid";
     $parameters['ring_group_uuid'] = $ring_group_uuid;
     $database = new database;
     $ring_group = $database->select($sql, $parameters, 'row');
+    if (empty($ring_group)) {
+        $reason = isset($save_message['message']) ? $save_message['message'] : 'unknown database error';
+        error_log("RINGGROUP_CREATE_ERROR: " . $body->extension . ": " . $reason);
+        return array("error" => "error adding ring group: " . $reason);
+    }
     return $ring_group;
 }

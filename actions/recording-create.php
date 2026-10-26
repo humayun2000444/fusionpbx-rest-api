@@ -77,12 +77,20 @@ function do_action($body) {
     $array['recordings'][0]['recording_name'] = $recording_name;
     $array['recordings'][0]['recording_description'] = $recording_description;
 
+    // save() gates on permission_exists('recording_add') and there is no
+    // logged-in user over REST, so without this grant it always refused and the
+    // direct INSERT below did the work. Grant it so the ORM path is the one used.
+    $permission = permissions::new();
+    $permission->add('recording_add', 'temp');
+
     // Execute insert using database class
     $database = new database;
     $database->app_name = 'recordings';
     $database->app_uuid = '83913217-c7a2-9e90-925d-a866eb40b60e';
     $database->save($array);
     unset($array);
+
+    $permission->delete('recording_add', 'temp');
 
     // Verify the insert worked
     $sql = "SELECT recording_uuid FROM v_recordings WHERE recording_uuid = :recording_uuid";

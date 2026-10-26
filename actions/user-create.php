@@ -42,19 +42,37 @@ function do_action($body) {
         "insert_date" => date("Y-m-d H:i:s")
     );
     
-    $_SESSION["permissions"]["user_add"] = true;
-    $_SESSION["permissions"]["user_group_add"] = true;
-    
+    // save() gates on permission_exists('user_add') and ('user_group_add'), and
+    // there is no logged-in user over REST. Setting $_SESSION['permissions'] only
+    // counts if nothing has built the permissions singleton yet, so grant on the
+    // singleton itself, as the GUI and domain-create.php do.
+    $granted = array("user_add", "user_group_add");
+    $permission = permissions::new();
+    foreach ($granted as $p) {
+        $permission->add($p, "temp");
+    }
+
     $database = new database;
     $database->app_name = "rest_api";
     $database->app_uuid = "2bfe71d9-e112-4b8b-bcff-75aeb0e06302";
-    if(!$database->save($array)) {
-        return array("error" => "Error creating user");
+    $database->save($array);
+    $save_message = $database->message;
+    unset($array);
+
+    foreach ($granted as $p) {
+        $permission->delete($p, "temp");
     }
-    
-    // Return created user (without sensitive data)
+
+    // Return created user (without sensitive data). save() returns its message
+    // array, which is truthy even when it refuses, so check the row landed instead.
     $sql = "SELECT user_uuid, domain_uuid, username, user_email, user_status, user_enabled, insert_date FROM v_users WHERE user_uuid = :user_uuid";
     $parameters["user_uuid"] = $user_uuid;
     $database = new database;
-    return $database->select($sql, $parameters, "row");
+    $user = $database->select($sql, $parameters, "row");
+    if (empty($user)) {
+        $reason = isset($save_message["message"]) ? $save_message["message"] : "unknown database error";
+        error_log("USER_CREATE_ERROR: " . $body->username . ": " . $reason);
+        return array("error" => "Error creating user: " . $reason);
+    }
+    return $user;
 }
