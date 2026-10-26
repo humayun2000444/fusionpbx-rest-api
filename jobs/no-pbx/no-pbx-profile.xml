@@ -24,7 +24,13 @@
 		     which is empty on an inbound call, so the call parks with no Caller-Destination-Number.
 		     The dialled number stays in variable_sip_req_user. A ${...} in this value cannot restore
 		     it: FreeSWITCH turns ${ into %{ when it builds the caller profile (profile_dup_clean). -->
-		<param name="dialplan" value="inline:park"/>
+		<!-- process_cdr=false: RouteSphere writes its own CDR from the ESL events, and this leg is not a FusionPBX
+		     call, so mod_xml_cdr must not write one for FusionPBX's importer to load into v_xml_cdr (it would
+		     show up there as a call with no domain and no direction). The variable stays on the channel through
+		     RouteSphere's inline transfer. The legs RouteSphere bridges out are b-legs, which are not logged.
+		     The m:^: prefix makes ^ the separator between the two applications: FreeSWITCH splits this whole
+		     value on commas into a list of dialplans, so "set:...,park" would name a dialplan called "park". -->
+		<param name="dialplan" value="inline:m:^:set:process_cdr=false^park"/>
 		<!-- no digest auth and no registrations, so no directory lookup either -->
 		<param name="auth-calls" value="false"/>
 		<param name="disable-register" value="true"/>

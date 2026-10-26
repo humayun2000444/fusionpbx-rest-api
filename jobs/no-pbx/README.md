@@ -115,6 +115,21 @@ One FreeSWITCH has only one event socket listener.
   `ClueCon`, which leaves the switch directories blank on the next
   `upgrade.php --defaults` run (see the mail-VM install notes).
 
+## Call detail records
+
+FusionPBX's CDR importer loads every CDR that mod_xml_cdr writes. A call parked on this profile belongs to
+RouteSphere, which writes its own CDR from the event socket, so the profile parks with `process_cdr=false` and
+FusionPBX records nothing for that leg. Without it every RouteSphere call also shows up in the FusionPBX CDR page
+as a call with no domain and no direction.
+
+The dialplan value is `inline:m:^:set:process_cdr=false^park`. Use `m:^:` and not a comma: FreeSWITCH splits the
+whole value on commas into a list of dialplans, so `set:process_cdr=false,park` makes `park` a dialplan name and
+the call hangs up at once ("has executed the last dialplan instruction").
+
+The legs RouteSphere bridges out are b-legs, which mod_xml_cdr does not log (`log-b-leg=false`). A call between a
+FusionPBX extension and RouteSphere keeps the extension's own CDR in its domain, which is correct. When the bridge
+target is FusionPBX itself (the testbed's echo test) the far end arrives as a normal inbound call and is recorded.
+
 ## Rollback
 
     jobs/no-pbx/rollback.sh              # profile stopped and removed now; wrapper stays until the next restart
