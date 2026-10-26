@@ -24,8 +24,15 @@
  *   forward-caller-id           an inbound call that reaches an extension
  *                               remembers which extension (a set, no lookup)
  *   forward-caller-id-outbound  when the same call is later routed to a number
- *                               that is not an extension, it presents that
- *                               extension's outbound caller ID
+ *                               that is not an extension, it presents the DID
+ *                               that was called, else that extension's outbound
+ *                               caller ID; the name is the extension's outbound
+ *                               caller ID name when it has one
+ *
+ * The called DID is ${caller_destination}, which the stock public caller-details
+ * dialplan sets from the To user on every inbound call. RouteSphere delivers a
+ * call to a partner with its own canonical form of that partner's DID, so it is
+ * exactly what the strict-DID check accepts, and it needs no per-extension setup.
  *
  * The directory lookup happens only on the outbound pass, so inbound calls that
  * are never forwarded cost nothing extra (BTCL runs close to its CPU ceiling).
@@ -92,16 +99,24 @@ function fcid_dialplans() {
             'dialplan_uuid' => FCID_OUTBOUND,
             'app_uuid' => '2e885bce-0a34-4241-8c57-c29b0f83e524',
             'dialplan_name' => 'forward-caller-id-outbound',
-            'dialplan_description' => 'A forwarded or transferred outside call presents the forwarding extension\'s caller ID; RouteSphere rejects any caller that is not an owned DID (rest_api jobs/forward-caller-id.php).',
+            'dialplan_description' => 'A forwarded or transferred outside call presents the DID that was called (else the extension\'s caller ID); RouteSphere rejects any caller that is not an owned DID (rest_api jobs/forward-caller-id.php).',
             'dialplan_details' => array(
                 fcid_detail('d3dad96d-50ab-42a9-9012-0e4f9e89d13b', 0, 5, 'condition', '${user_exists}', '^false$'),
                 fcid_detail('a3124888-28dc-470e-beb0-c3106e15e42c', 0, 10, 'condition', '${call_direction}', '^inbound$'),
                 fcid_detail('6a3d62d5-3fe1-4434-95b4-0c9644f419e5', 0, 15, 'condition', '${forward_caller_id_extension}', '^.+$'),
-                fcid_detail('d06b4f07-735f-4599-bed2-f556bba946b3', 0, 20, 'condition', $extension_cid . 'number}', '^(.+)$'),
+                // fallback: the extension's own outbound caller ID
+                fcid_detail('d06b4f07-735f-4599-bed2-f556bba946b3', 0, 20, 'condition', $extension_cid . 'number}', '^(.+)$', 'never'),
                 fcid_detail('0cf784ba-9b02-410e-b8d2-c2940fcb0008', 0, 25, 'action', 'set', 'outbound_caller_id_number=$1', null, 'true'),
                 fcid_detail('f8af4be3-a1ca-4521-9cbb-a0bbde8c9d16', 0, 30, 'action', 'set', 'outbound_caller_id_name=$1', null, 'true'),
-                fcid_detail('e30b2c89-2d37-4a05-9685-b22b7355e792', 1, 35, 'condition', $extension_cid . 'name}', '^(.+)$', 'never'),
-                fcid_detail('143cde73-9807-4679-a947-c47188b430eb', 1, 40, 'action', 'set', 'outbound_caller_id_name=$1', null, 'true'),
+                // preferred: the DID that was called. 8+ digits because the global
+                // caller-details fills an empty caller_destination with the
+                // extension number, and that must never go out as a caller ID.
+                fcid_detail('b053ddc6-bb38-42fd-93a3-7961e3cffda5', 1, 35, 'condition', '${caller_destination}', '^(\+?\d{8,})$', 'never'),
+                fcid_detail('aae65761-5f7b-4f06-b4f2-8811f1ca5f42', 1, 40, 'action', 'set', 'outbound_caller_id_number=$1', null, 'true'),
+                fcid_detail('cd4c9adb-5335-41ee-a457-7d781b458a91', 1, 45, 'action', 'set', 'outbound_caller_id_name=$1', null, 'true'),
+                // the extension's outbound caller ID name, when it has one
+                fcid_detail('e30b2c89-2d37-4a05-9685-b22b7355e792', 2, 50, 'condition', $extension_cid . 'name}', '^(.+)$', 'never'),
+                fcid_detail('143cde73-9807-4679-a947-c47188b430eb', 2, 55, 'action', 'set', 'outbound_caller_id_name=$1', null, 'true'),
             ),
         ),
     );
@@ -193,12 +208,13 @@ function fcid_apply($database) {
     // Check what landed, including that the rows stayed global.
     $database = new database;
     $rows = fcid_rows($database);
-    $expected_details = array(FCID_REMEMBER => 3, FCID_OUTBOUND => 8);
+    $expected_details = array(FCID_REMEMBER => 3, FCID_OUTBOUND => 11);
     $ok = count($rows) == 2;
     foreach ($rows as $row) {
         $ok = $ok && $row['domain_uuid'] === null && $row['dialplan_context'] === 'global'
             && (int)$row['details'] === $expected_details[$row['dialplan_uuid']]
-            && strpos($row['dialplan_xml'], 'forward_caller_id_extension') !== false;
+            && strpos($row['dialplan_xml'], 'forward_caller_id_extension') !== false
+            && ($row['dialplan_uuid'] !== FCID_OUTBOUND || strpos($row['dialplan_xml'], '${caller_destination}') !== false);
     }
     if (!$ok) {
         fcid_delete($database);
