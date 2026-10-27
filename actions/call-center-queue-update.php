@@ -2,6 +2,41 @@
 
 $required_params = array("callCenterQueueUuid");
 
+/**
+ * Point the queue's dialplan at the queue as mod_callcenter knows it:
+ * destination ^<extension>$ -> callcenter <extension>@<domain>.
+ *
+ * This action used to leave the dialplan alone, so a changed extension kept
+ * answering on the old number, and a queue created by the old create action
+ * (which wrote the queue NAME, "test@domain") stayed unreachable. Rewritten on
+ * every save, so saving such a queue once also repairs it.
+ */
+function cc_queue_sync_dialplan($database, $dialplan_uuid, $extension, $domain_name) {
+    if (empty($dialplan_uuid) || $extension === '' || $extension === null) return false;
+    $xml = $database->select("SELECT dialplan_xml FROM v_dialplans WHERE dialplan_uuid = :u",
+        array("u" => $dialplan_uuid), "column");
+    if ($xml) {
+        $target = $extension . '@' . $domain_name;
+        $xml = preg_replace('/(application="callcenter" data=")[^"]*(")/', '${1}' . $target . '${2}', $xml);
+        $xml = preg_replace('/(field="destination_number" expression="\^)[^"]*(\$")/', '${1}' . $extension . '${2}', $xml);
+        $database->execute("UPDATE v_dialplans SET dialplan_xml = :x, dialplan_number = :n, update_date = NOW()
+            WHERE dialplan_uuid = :u", array("x" => $xml, "n" => $extension, "u" => $dialplan_uuid));
+        $database->execute("UPDATE v_dialplan_details SET dialplan_detail_data = :d
+            WHERE dialplan_uuid = :u AND dialplan_detail_tag = 'action' AND dialplan_detail_type = 'callcenter'",
+            array("d" => $target, "u" => $dialplan_uuid));
+        $database->execute("UPDATE v_dialplan_details SET dialplan_detail_data = :d
+            WHERE dialplan_uuid = :u AND dialplan_detail_tag = 'condition' AND dialplan_detail_type = 'destination_number'",
+            array("d" => '^' . $extension . '$', "u" => $dialplan_uuid));
+    }
+    if (class_exists('cache')) {
+        $cache = new cache;
+        $cache->delete("dialplan:" . $domain_name);
+    }
+    $cache_file = '/var/cache/fusionpbx/dialplan.' . $domain_name;
+    if (file_exists($cache_file)) @unlink($cache_file);
+    return true;
+}
+
 function do_action($body) {
     global $domain_uuid;
 
@@ -74,6 +109,9 @@ function do_action($body) {
 
     // Get the new extension if changed
     $new_extension = isset($body->queueExtension) ? $body->queueExtension : (isset($body->queue_extension) ? $body->queue_extension : $old_extension);
+
+    // The dialplan has to follow, or calls go to the old number / no queue.
+    cc_queue_sync_dialplan($database, $queue['dialplan_uuid'], $new_extension, $domain_name);
 
     // Reload queue in FreeSWITCH
     $esl = event_socket::create();

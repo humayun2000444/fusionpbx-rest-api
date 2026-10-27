@@ -170,7 +170,11 @@ function create_queue_dialplan($database, $dialplan_uuid, $domain_uuid, $domain_
         $xml .= '		<action application="set" data="cc_exit_keys=' . htmlspecialchars($queue_cc_exit_keys) . '"/>' . "\n";
     }
 
-    $xml .= '		<action application="callcenter" data="' . $queue_name . '@' . $domain_name . '"/>' . "\n";
+    // mod_callcenter knows a FusionPBX queue as <EXTENSION>@<domain> (that is
+    // what callcenter.conf is generated with, and what FusionPBX's own queue
+    // page writes). The NAME here made every queue created through the API
+    // unreachable: "test@domain" while the loaded queue was "100@domain".
+    $xml .= '		<action application="callcenter" data="' . $queue_extension . '@' . $domain_name . '"/>' . "\n";
 
     if (!empty($queue_timeout_action)) {
         $action_parts = explode(":", $queue_timeout_action, 2);
@@ -252,7 +256,7 @@ function create_queue_dialplan($database, $dialplan_uuid, $domain_uuid, $domain_
         dialplan_detail_group, dialplan_detail_order)
         VALUES (:uuid, :domain_uuid, :dialplan_uuid, 'action', 'callcenter', :queue_id, '2', :ord)",
         array("uuid" => uuid(), "domain_uuid" => $domain_uuid, "dialplan_uuid" => $dialplan_uuid,
-              "queue_id" => $queue_name . '@' . $domain_name, "ord" => $y * 10));
+              "queue_id" => $queue_extension . '@' . $domain_name, "ord" => $y * 10));
     $y++;
 
     // Detail: hangup (group 2)
