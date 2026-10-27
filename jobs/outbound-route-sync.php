@@ -62,14 +62,16 @@ if (($argv[1] ?? '') === '__action') {
 }
 
 // Same names, orders, patterns and dialling rules as RTC-Manager PartnerService.
+// Keys must not look like numbers: PHP turns '8802' into int 8802 and every
+// === '8802' check silently fails.
 function ors_specs() {
     return array(
         'international' => array('name' => 'international', 'order' => 50, 'pattern' => '^(00|\+)(\d+)$', 'toll' => 'international', 'callee' => '$1$2', 'suffix' => '$1$2', 'call_direction' => true, 'description' => 'International outbound route (00 or +), passed through to the gateway unchanged'),
         'emergency' => array('name' => 'outbound-emergency', 'order' => 91, 'pattern' => '^(999|333|109|106|1090|1098|10921|10655)$', 'toll' => '', 'callee' => '$1', 'suffix' => '$1', 'call_direction' => false, 'description' => 'Emergency and helpline short codes'),
-        '16' => array('name' => 'outbound-shortcode-16', 'order' => 92, 'pattern' => '^(16\d{3})$', 'toll' => '', 'callee' => '$1', 'suffix' => '$1', 'call_direction' => false, 'description' => '5 digit short codes starting with 16'),
-        '14' => array('name' => 'outbound-shortcode-14', 'order' => 93, 'pattern' => '^(14\d{3})$', 'toll' => '', 'callee' => '$1', 'suffix' => '$1', 'call_direction' => false, 'description' => '5 digit short codes starting with 14'),
-        '02' => array('name' => 'outbound-landline-02', 'order' => 94, 'pattern' => '^(02\d{8})$', 'toll' => '', 'callee' => '$1', 'suffix' => null, 'call_direction' => false, 'description' => 'Dhaka landline 02 numbers (10 digits)'),
-        '8802' => array('name' => 'outbound-landline-8802', 'order' => 96, 'pattern' => '^(8802\d{8})$', 'toll' => '', 'callee' => '$1', 'suffix' => '$1', 'call_direction' => false, 'description' => 'Dhaka landline in 8802 form (12 digits)'),
+        'shortcode16' => array('name' => 'outbound-shortcode-16', 'order' => 92, 'pattern' => '^(16\d{3})$', 'toll' => '', 'callee' => '$1', 'suffix' => '$1', 'call_direction' => false, 'description' => '5 digit short codes starting with 16'),
+        'shortcode14' => array('name' => 'outbound-shortcode-14', 'order' => 93, 'pattern' => '^(14\d{3})$', 'toll' => '', 'callee' => '$1', 'suffix' => '$1', 'call_direction' => false, 'description' => '5 digit short codes starting with 14'),
+        'landline02' => array('name' => 'outbound-landline-02', 'order' => 94, 'pattern' => '^(02\d{8})$', 'toll' => '', 'callee' => '$1', 'suffix' => null, 'call_direction' => false, 'description' => 'Dhaka landline 02 numbers (10 digits)'),
+        'landline8802' => array('name' => 'outbound-landline-8802', 'order' => 96, 'pattern' => '^(8802\d{8})$', 'toll' => '', 'callee' => '$1', 'suffix' => '$1', 'call_direction' => false, 'description' => 'Dhaka landline in 8802 form (12 digits)'),
     );
 }
 
@@ -139,7 +141,7 @@ function ors_plan($database) {
             if (($key === 'international' && $have_intl) || ($key !== 'international' && in_array($spec['pattern'], $patterns, true))) {
                 continue;
             }
-            if ($key === '8802' && !$has13) {
+            if ($key === 'landline8802' && !$has13) {
                 $lines[] = "  skip     outbound-landline-8802: no 13-digit route here, so no evidence the gateway takes 880 numbers";
                 continue;
             }
