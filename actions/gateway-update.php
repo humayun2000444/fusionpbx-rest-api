@@ -1,9 +1,33 @@
 <?php
+/*
+ * gateway-update — change a gateway AND make the switch use the change.
+ *
+ * "sofia profile <p> rescan" only ADDS gateways it has not seen; it never
+ * reloads one that is already running. So an edit (proxy, credentials,
+ * transport…) was saved to v_gateways and the running gateway kept its old
+ * settings, and enabled=false left it registered and carrying calls — the CRM's
+ * enable/disable goes through this action too. FusionPBX's own edit page has
+ * the same gap; its separate Stop/Start buttons are what restart a gateway.
+ *
+ * So after the write: killgw the gateway (sofia knows it by its lowercased
+ * uuid) on its old profile — and the new one if that changed — wait until
+ * sofia has actually dropped it, then rescan, which loads it back from the
+ * database with the new settings (or not at all when disabled). A call in
+ * progress on this gateway may be cut, as it would be by the GUI's Stop.
+ */
 $required_params = array("gateway_uuid");
 
+/** True once sofia no longer knows the gateway (killgw is asynchronous). */
+function gw_update_gone($profile, $name) {
+    $out = class_exists('event_socket')
+        ? (string) event_socket::api("sofia status gateway " . $name)
+        : (string) shell_exec("/usr/bin/fs_cli -x 'sofia status gateway " . $name . "' 2>&1");
+    return stripos($out, 'Invalid Gateway') !== false || trim($out) === '';
+}
+
 function do_action($body) {
-    // Check if gateway exists
-    $sql = "SELECT gateway_uuid FROM v_gateways WHERE gateway_uuid = :gateway_uuid";
+    // Check if gateway exists (and remember the profile it is running on now)
+    $sql = "SELECT gateway_uuid, profile FROM v_gateways WHERE gateway_uuid = :gateway_uuid";
     $parameters["gateway_uuid"] = $body->gateway_uuid;
     $database = new database;
     $existing = $database->select($sql, $parameters, "row");
@@ -11,6 +35,7 @@ function do_action($body) {
     if(!$existing) {
         return array("error" => "Gateway not found");
     }
+    $old_profile = !empty($existing["profile"]) ? $existing["profile"] : "external";
     unset($parameters);
 
     // Build update query dynamically
@@ -148,38 +173,41 @@ function do_action($body) {
 
     $reload_output = "";
     $reload_success = false;
+    $name = strtolower($body->gateway_uuid);
+    $profiles = array_values(array_unique(array($old_profile, $profile)));
+    $steps = array();
 
-    // Use event socket like FusionPBX does
-    if (class_exists('event_socket')) {
-        $esl = event_socket::create();
-        if ($esl) {
-            // Get hostname for cache key
-            $hostname = trim(event_socket::api('switchname'));
-
-            // Clear the cache (same as FusionPBX)
-            if (class_exists('cache')) {
-                $cache = new cache;
-                $cache->delete("configuration:sofia.conf:" . $hostname);
-            }
-
-            // Rescan the profile
-            $reload_output = event_socket::api('sofia profile ' . $profile . ' rescan');
-            usleep(500000); // Wait 0.5 seconds
-
-            // Reload XML as well
-            event_socket::api('reloadxml');
-
-            $reload_success = true;
+    $api = function ($cmd) {
+        if (class_exists('event_socket') && event_socket::create()) {
+            return trim((string) event_socket::api($cmd));
         }
+        return trim((string) shell_exec("/usr/bin/fs_cli -x '" . $cmd . "' 2>&1"));
+    };
+
+    // The switch builds sofia.conf from the database; drop its cached copy.
+    $hostname = $api('switchname');
+    if (class_exists('cache')) {
+        $cache = new cache;
+        $cache->delete("configuration:sofia.conf:" . $hostname);
     }
 
-    // Fallback to fs_cli if event socket failed
-    if (!$reload_success) {
-        $reload_output = shell_exec("/usr/bin/fs_cli -x 'sofia profile " . $profile . " rescan' 2>&1");
-        usleep(500000);
-        shell_exec("/usr/bin/fs_cli -x 'reloadxml' 2>&1");
-        $reload_success = ($reload_output !== null && strpos($reload_output, 'err') === false);
+    // Stop the running gateway so the rescan reloads it rather than skipping it.
+    foreach ($profiles as $p) {
+        $steps[] = "killgw $p: " . $api("sofia profile " . $p . " killgw " . $name);
     }
+    for ($i = 0; $i < 25 && !gw_update_gone($profile, $name); $i++) {
+        usleep(200000);
+    }
+
+    $reload_output = $api("sofia profile " . $profile . " rescan");
+    $steps[] = "rescan $profile: " . $reload_output;
+    $reload_success = (stripos($reload_output, '-ERR') === false);
+
+    // What the switch is running now, so the caller is not told "updated"
+    // about a gateway that did not come back.
+    usleep(500000);
+    $status = $api("sofia status gateway " . $name);
+    $running = stripos($status, 'Invalid Gateway') === false && $status !== '';
 
     // Return updated gateway
     $sql = "SELECT gateway_uuid, domain_uuid, gateway, username, proxy, register_proxy,
@@ -191,6 +219,12 @@ function do_action($body) {
     $database = new database;
     $result = $database->select($sql, $parameters, "row");
     $result["reloaded"] = $reload_success;
+    $result["running"] = $running;
     $result["reload_output"] = trim($reload_output);
+    $result["reload_steps"] = $steps;
+    // Enabled but not running after the reload is a real failure, not a success.
+    if ($reload_success && ($result["enabled"] === "true" || $result["enabled"] === true) && !$running) {
+        $result["warning"] = "Saved, but the switch did not start the gateway again — check its settings.";
+    }
     return $result;
 }
