@@ -299,6 +299,13 @@ LUA;
         }
     }
 
+    // A route added where agents have their own gateway follows those
+    // assignments too (crm-agent-gateway-helper.php). No-op everywhere else.
+    if (file_exists(__DIR__ . '/crm-agent-gateway-helper.php')) {
+        require_once(__DIR__ . '/crm-agent-gateway-helper.php');
+        crm_agw_sync_routes(new database, $route_domain_uuid, $context);
+    }
+
     // Clear cache and reload dialplan
     $reload_output = "";
     $reload_success = false;
