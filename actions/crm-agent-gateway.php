@@ -50,7 +50,54 @@ function crm_agw_list($database, $domain_uuid) {
     }
     return array("success" => true, "scriptInstalled" => file_exists(CRM_AGW_SCRIPT),
         "gateways" => $out_gateways, "assignments" => $out_assignments,
-        "routes" => crm_agw_coverage($database, $domain_uuid));
+        "routes" => crm_agw_coverage($database, $domain_uuid),
+        "defaults" => crm_agw_defaults($database, $domain_uuid));
+}
+
+/**
+ * What "Company default" means: for each dial pattern, the enabled route the
+ * switch reaches first (lowest order; it stops at the first match) and its
+ * gateway. Same order, same pattern: the name decides here, as it does in the
+ * dialplan cache today, but the switch does not promise that.
+ */
+function crm_agw_defaults($database, $domain_uuid) {
+    $rows = $database->select(
+        "SELECT DISTINCT ON (p.dialplan_uuid)
+                p.dialplan_uuid, p.dialplan_name, p.dialplan_order,
+                (SELECT x.dialplan_detail_data FROM v_dialplan_details x
+                  WHERE x.dialplan_uuid = p.dialplan_uuid AND x.dialplan_detail_tag = 'condition'
+                    AND x.dialplan_detail_type = 'destination_number'
+                  ORDER BY x.dialplan_detail_order LIMIT 1) AS pattern,
+                substring(b.dialplan_detail_data from 'sofia/gateway/([0-9a-fA-F-]{36})/') AS gateway_uuid
+           FROM v_dialplans p
+           JOIN v_dialplan_details b ON b.dialplan_uuid = p.dialplan_uuid
+          WHERE p.domain_uuid = :domain_uuid AND p.app_uuid = :app_uuid
+            AND p.dialplan_enabled = 'true'
+            AND b.dialplan_detail_tag = 'action' AND b.dialplan_detail_type = 'bridge'
+            AND b.dialplan_detail_data LIKE 'sofia/gateway/%'
+          ORDER BY p.dialplan_uuid, b.dialplan_detail_order",
+        array("domain_uuid" => $domain_uuid, "app_uuid" => CRM_AGW_OUTBOUND_APP_UUID), "all");
+    $rows = is_array($rows) ? $rows : array();
+    usort($rows, function ($a, $b) {
+        return ((int) $a['dialplan_order'] - (int) $b['dialplan_order'])
+            ?: strcmp((string) $a['dialplan_name'], (string) $b['dialplan_name']);
+    });
+    $names = array();
+    foreach ((array) $database->select("SELECT gateway_uuid, gateway FROM v_gateways WHERE domain_uuid = :d",
+                 array("d" => $domain_uuid), "all") as $g) {
+        $names[strtolower($g['gateway_uuid'])] = $g['gateway'];
+    }
+    $out = array();
+    foreach ($rows as $r) {
+        $pattern = (string) $r['pattern'];
+        if ($pattern === '' || isset($out[$pattern])) {
+            continue;
+        }
+        $gw = strtolower((string) $r['gateway_uuid']);
+        $out[$pattern] = array("pattern" => $pattern, "route" => $r['dialplan_name'],
+            "gatewayUuid" => $gw, "gatewayName" => isset($names[$gw]) ? $names[$gw] : null);
+    }
+    return array_values($out);
 }
 
 function do_action($body) {
