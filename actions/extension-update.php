@@ -171,8 +171,11 @@ function do_action($body) {
 
         $db_column = isset($field_mappings[$key]) ? $field_mappings[$key] : null;
         if ($db_column && $value !== null) {
+            // Keyed by column: callers send both spellings of a field
+            // (outboundCallerIdNumber AND outbound_caller_id_number), and two
+            // assignments to one column fail the whole UPDATE.
             $param_name = str_replace('.', '_', $db_column);
-            $updates[] = $db_column . " = :" . $param_name;
+            $updates[$db_column] = $db_column . " = :" . $param_name;
             $parameters[$param_name] = $value;
         }
     }
@@ -190,7 +193,15 @@ function do_action($body) {
     // Execute update
     $sql = "UPDATE v_extensions SET " . implode(", ", $updates) . " WHERE extension_uuid = :extension_uuid";
     try {
-        $database->execute($sql, $parameters);
+        // FusionPBX's database class swallows the SQL error and returns false;
+        // without this check a refused UPDATE was reported as a success.
+        if ($database->execute($sql, $parameters) === false) {
+            $why = isset($database->message['message']) ? $database->message['message'] : 'the database refused the change';
+            return array(
+                "success" => false,
+                "error" => "Failed to update extension: " . (is_string($why) ? $why : json_encode($why))
+            );
+        }
     } catch (Exception $e) {
         return array(
             "success" => false,
