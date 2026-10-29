@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/outbound-route-conditions-helper.php';
+
 $required_params = array("dialplan_name", "gateway_uuid", "destination_pattern");
 
 function do_action($body) {
@@ -22,6 +24,11 @@ function do_action($body) {
     }
     if(!$context) {
         $context = "public";
+    }
+
+    $extra_conditions = outbound_route_extra_conditions($body);
+    if (is_string($extra_conditions)) {
+        return array("error" => $extra_conditions, "code" => 400);
     }
 
     // Verify gateway exists
@@ -156,6 +163,8 @@ function do_action($body) {
 
     // Condition: user_exists = false
     insert_detail($dialplan_uuid_2, $route_domain_uuid, 'condition', '${user_exists}', 'false', 0, $detail_order += 10);
+    // extra conditions (extra_conditions), right after user_exists
+    outbound_route_put_conditions($dialplan_uuid_2, $route_domain_uuid, $extra_conditions);
 
     // Condition: toll_allow check (if domestic or international detected)
     if ($toll_allow_type) {

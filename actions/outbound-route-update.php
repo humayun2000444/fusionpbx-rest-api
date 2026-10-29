@@ -1,10 +1,11 @@
 <?php
 require_once(__DIR__ . '/outbound-route-xml-helper.php');
+require_once(__DIR__ . '/outbound-route-conditions-helper.php');
 $required_params = array("dialplan_uuid");
 
 function do_action($body) {
     // Check if route exists
-    $sql = "SELECT dialplan_uuid, dialplan_context FROM v_dialplans WHERE dialplan_uuid = :dialplan_uuid";
+    $sql = "SELECT dialplan_uuid, dialplan_context, domain_uuid FROM v_dialplans WHERE dialplan_uuid = :dialplan_uuid";
     $parameters = array("dialplan_uuid" => $body->dialplan_uuid);
     $database = new database;
     $existing = $database->select($sql, $parameters, "row");
@@ -90,6 +91,15 @@ function do_action($body) {
         $database = new database;
         $database->execute($sql, $parameters);
         unset($parameters);
+    }
+
+    // Add or change extra conditions if provided (extra_conditions)
+    $extra_conditions = outbound_route_extra_conditions($body);
+    if (is_string($extra_conditions)) {
+        return array("error" => $extra_conditions, "code" => 400);
+    }
+    if (!empty($extra_conditions)) {
+        outbound_route_put_conditions($body->dialplan_uuid, $existing["domain_uuid"], $extra_conditions);
     }
 
     // Update destination pattern if provided
