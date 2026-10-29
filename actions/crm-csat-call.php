@@ -27,6 +27,9 @@
  *   thanksRecordingUuid    optional, played after a valid keypress
  *   scale                  3 or 5: the keys accepted
  *   token                  the survey's reference; comes back with the keypress
+ *   gatewayUuid            optional: send the survey through this gateway of the
+ *                          company's own first; if it is down or refuses, the
+ *                          Default route's gateway takes the call
  *   answerUrl              where the keypress is reported (the CRM's
  *                          /portal/csat/voice); ?token=&digit= are appended
  *   dryRun                 true: check and resolve everything, ring nobody
@@ -154,11 +157,28 @@ function do_action($body) {
     if (!$gateway) {
         return array("error" => "no outbound route of this company takes " . $phone, "code" => 400);
     }
+    // The company's own choice of gateway for surveys, tried first with the
+    // digits its Default route sends. A gateway that is not the company's, or
+    // is turned off, is not tried: the Default route's carries the call.
+    $chosen = isset($body->gatewayUuid) ? strtolower(trim((string) $body->gatewayUuid)) : '';
+    $dial = "sofia/gateway/$gateway/$digits";
+    $via = $gateway;
+    if ($chosen !== '' && $chosen !== $gateway) {
+        if (!preg_match('/^[0-9a-f-]{36}$/', $chosen)) {
+            return array("error" => "gatewayUuid is not a gateway id", "code" => 400);
+        }
+        $own = $database->select("SELECT gateway_uuid FROM v_gateways WHERE gateway_uuid = :g
+            AND domain_uuid = :d AND enabled = 'true'", array("g" => $chosen, "d" => $db_domain_uuid), "column");
+        if ($own) {
+            $dial = "sofia/gateway/$chosen/$digits|sofia/gateway/$gateway/$digits";
+            $via = $chosen;
+        }
+    }
 
     if (!empty($body->dryRun)) {
         // Everything checked and resolved, nobody rung.
         return array("success" => true, "dryRun" => true, "route" => $route,
-                     "dial" => "sofia/gateway/$gateway/$digits",
+                     "dial" => $dial, "gateway" => $via,
                      "question" => basename($question), "thanks" => $thanks ? basename($thanks) : null);
     }
 
@@ -173,6 +193,9 @@ function do_action($body) {
         // when the customer picks up, not while their phone is still ringing.
         "ignore_early_media=true",
         "originate_timeout=40",
+        // The second gateway is for a gateway that failed, not for a customer
+        // who did not answer: busy or unanswered ends the attempt there.
+        "fail_on_single_reject='USER_BUSY,NO_ANSWER,NO_USER_RESPONSE'",
         "call_direction=outbound",
         "domain_uuid=$db_domain_uuid",
         "domain_name=$domain_name",
@@ -182,7 +205,7 @@ function do_action($body) {
         "crm_csat_thanks='$thanks'",
         "crm_csat_url=$answer_url",
     );
-    $cmd = "originate {" . implode(",", $vars) . "}sofia/gateway/$gateway/$digits &lua(crm_csat.lua)";
+    $cmd = "originate {" . implode(",", $vars) . "}$dial &lua(crm_csat.lua)";
     // In the background: originate waits for an answer, and the CRM should not.
     // ONE attempt only — a second path tried after an unclear reply would ring
     // the customer twice. bgapi's reply comes back as headers (an array), not
@@ -196,6 +219,6 @@ function do_action($body) {
         $resp = (string) shell_exec("/usr/bin/fs_cli -x " . escapeshellarg("bgapi " . $cmd) . " 2>&1");
     }
     $ok = strpos($resp, '+OK') !== false || strpos($resp, 'Job-UUID') !== false;
-    return array("success" => $ok, "callUuid" => $call_uuid, "route" => $route,
+    return array("success" => $ok, "callUuid" => $call_uuid, "route" => $route, "gateway" => $via,
                  "error" => $ok ? null : ("the call was not placed: " . trim($resp)));
 }
