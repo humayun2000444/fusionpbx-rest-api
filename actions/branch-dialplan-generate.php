@@ -3,7 +3,7 @@
 // Generate inter-branch dialplans for all members of a branch group
 // Each domain gets dialplan entries to route calls to other branch domains via prefix
 
-require_once dirname(__FILE__) . '/branch-scope.php';
+require_once dirname(__FILE__) . '/../lib/branch-scope.php';
 
 $required_params = array("branchGroupUuid");
 

@@ -1,6 +1,6 @@
 <?php
 
-require_once dirname(__FILE__) . '/branch-scope.php';
+require_once dirname(__FILE__) . '/../lib/branch-scope.php';
 
 $required_params = array("branchGroupUuid", "branchPrefix");
 
