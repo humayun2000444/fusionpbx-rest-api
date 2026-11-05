@@ -16,14 +16,32 @@
 // plus the domain that created it (a group with no members yet would otherwise
 // vanish from its creator's list the moment it was made).
 //
-// WHERE THE CALLER COMES FROM
-// ---------------------------
-// The body's domainUuid, which is trustworthy by the time it arrives here even
-// though the client sent it: TelcoGateway's TenantScopeFilters strips any
-// client-supplied X-Auth-* header and injects the caller's database-backed
-// domain, and TelcoREST's DomainScopeFilter (tenant.scope.overwrite=true)
-// rewrites domainUuid in the body to that domain, injecting it when the body
-// omitted it. So domainUuid means "the caller" on every branch call.
+// WHERE THE CALLER COMES FROM, AND HOW FAR TO TRUST IT
+// ----------------------------------------------------
+// The body's domainUuid. An earlier version of this comment called that
+// trustworthy, on the grounds that TelcoGateway's TenantScopeFilters injects the
+// caller's database-backed domain and TelcoREST's DomainScopeFilter rewrites the
+// field to it. That is NOT true for these endpoints:
+//
+//   - All eight /FREESWITCHREST/api/v1/branch/* paths sit in TelcoGateway's
+//     PublicEndpointRegistry and TelcoREST's DatabaseContextResolver
+//     PUBLIC_ENDPOINTS, so they take no token. With no authenticated caller
+//     there is no AuthUser to read and no X-Auth-Domain-Uuid is injected.
+//     Verified 2026-11-06: both deployments answer branch-group-list over
+//     HTTPS with no Authorization header at all.
+//   - DomainScopeFilter only rewrites "when we actually know the caller's
+//     domain", so with no injected header it rewrites nothing, whatever
+//     tenant.scope.overwrite is set to. Setting overwrite for CCL changes
+//     nothing while the paths remain public.
+//
+// So what this file enforces is scoping, not authorisation. It stops the portal
+// showing one domain another's branch config, which is what it was written for,
+// and it is only as strong as the secrecy of a domain_uuid against a caller who
+// sets the field deliberately. Closing that needs the branch paths taken out of
+// both public lists and given a policy in the gateway's AppConfig, after which
+// the injected header arrives and this becomes a real boundary. 138
+// /FREESWITCHREST paths share the same gap, writes among them, so it is a
+// platform decision rather than a branch one.
 //
 // NOT the `global $domain_uuid` that these handlers all declared: rest.php never
 // assigns it, so it was null in all nine of them. That is also why insert_user is
