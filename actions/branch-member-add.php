@@ -1,16 +1,27 @@
 <?php
 
+require_once dirname(__FILE__) . '/branch-scope.php';
+
 $required_params = array("branchGroupUuid", "branchPrefix");
 
 function do_action($body) {
-    global $domain_uuid;
+    $caller = branch_caller_domain($body);
 
     $group_uuid = isset($body->branchGroupUuid) ? $body->branchGroupUuid :
                   (isset($body->branch_group_uuid) ? $body->branch_group_uuid : null);
-    $member_domain_uuid = isset($body->domainUuid) ? $body->domainUuid :
-                          (isset($body->domain_uuid) ? $body->domain_uuid : null);
-    $member_domain_name = isset($body->domainName) ? $body->domainName :
-                          (isset($body->domain_name) ? $body->domain_name : null);
+
+    // The domain being ADDED. Deliberately not read from domainUuid: TelcoREST
+    // rewrites that field to the caller's own domain, and injects it when the
+    // body omits it, so this handler used to resolve the member as the caller and
+    // quietly add the caller to its own group instead of the domain the admin
+    // typed. memberDomainName is what the portal sends; domainName is kept for
+    // older clients, which never got the right answer from domainUuid anyway.
+    $member_domain_uuid = isset($body->memberDomainUuid) ? $body->memberDomainUuid :
+                          (isset($body->member_domain_uuid) ? $body->member_domain_uuid : null);
+    $member_domain_name = isset($body->memberDomainName) ? $body->memberDomainName :
+                          (isset($body->member_domain_name) ? $body->member_domain_name :
+                          (isset($body->domainName) ? $body->domainName :
+                          (isset($body->domain_name) ? $body->domain_name : null)));
     $prefix = isset($body->branchPrefix) ? $body->branchPrefix :
               (isset($body->branch_prefix) ? $body->branch_prefix : null);
     $label = isset($body->branchLabel) ? $body->branchLabel :
@@ -31,13 +42,9 @@ function do_action($body) {
 
     $database = new database;
 
-    // Check group exists
-    $group = $database->select(
-        "SELECT branch_group_uuid, branch_group_name FROM v_branch_groups WHERE branch_group_uuid = :uuid",
-        array("uuid" => $group_uuid), "row"
-    );
-    if (empty($group)) {
-        return array("success" => false, "error" => "Branch group not found");
+    // Must be a group the caller is related to
+    if (!branch_domain_is_related($database, $group_uuid, $caller)) {
+        return branch_not_related_error();
     }
 
     // Look up domain by name or UUID
@@ -96,7 +103,7 @@ function do_action($body) {
             "domain_uuid" => $member_domain_uuid,
             "prefix" => $prefix,
             "label" => $label,
-            "insert_user" => $domain_uuid
+            "insert_user" => $caller
         ));
     } catch (Exception $e) {
         return array("success" => false, "error" => "Failed to add member: " . $e->getMessage());

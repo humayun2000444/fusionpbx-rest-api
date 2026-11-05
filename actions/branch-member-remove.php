@@ -1,9 +1,11 @@
 <?php
 
+require_once dirname(__FILE__) . '/branch-scope.php';
+
 $required_params = array("branchMemberUuid");
 
 function do_action($body) {
-    global $domain_uuid;
+    $caller = branch_caller_domain($body);
 
     $member_uuid = isset($body->branchMemberUuid) ? $body->branchMemberUuid :
                    (isset($body->branch_member_uuid) ? $body->branch_member_uuid : null);
@@ -23,6 +25,13 @@ function do_action($body) {
     );
     if (empty($member)) {
         return array("success" => false, "error" => "Branch member not found");
+    }
+
+    // Scoped by the member's group, not by the member: removing someone else from
+    // a group the caller is in is a legitimate act, removing anyone from a group
+    // it has nothing to do with is not.
+    if (!branch_domain_is_related($database, $member['branch_group_uuid'], $caller)) {
+        return branch_not_related_error();
     }
 
     try {

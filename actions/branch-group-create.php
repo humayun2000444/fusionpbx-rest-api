@@ -1,9 +1,17 @@
 <?php
 
+require_once dirname(__FILE__) . '/branch-scope.php';
+
 $required_params = array("branchGroupName");
 
 function do_action($body) {
-    global $domain_uuid;
+    // The creating domain is what makes a group visible to anyone before it has
+    // members, so a group with no creator would be an orphan nobody could see or
+    // add to. Refuse rather than create one.
+    $caller = branch_caller_domain($body);
+    if (empty($caller)) {
+        return array("success" => false, "error" => "Could not determine the calling domain");
+    }
 
     $group_name = isset($body->branchGroupName) ? $body->branchGroupName :
                   (isset($body->branch_group_name) ? $body->branch_group_name : null);
@@ -35,7 +43,7 @@ function do_action($body) {
         "branch_group_name" => $group_name,
         "branch_group_description" => $group_description,
         "branch_group_enabled" => $group_enabled,
-        "insert_user" => $domain_uuid
+        "insert_user" => $caller
     );
 
     try {

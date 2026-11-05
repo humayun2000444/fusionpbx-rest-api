@@ -3,12 +3,14 @@
 // Generate inter-branch dialplans for all members of a branch group
 // Each domain gets dialplan entries to route calls to other branch domains via prefix
 
+require_once dirname(__FILE__) . '/branch-scope.php';
+
 $required_params = array("branchGroupUuid");
 
 define('BRANCH_APP_UUID', 'b0555ec4-e7a4-4000-b0a4-000000000001');
 
 function do_action($body) {
-    global $domain_uuid;
+    $caller = branch_caller_domain($body);
 
     $group_uuid = isset($body->branchGroupUuid) ? $body->branchGroupUuid :
                   (isset($body->branch_group_uuid) ? $body->branch_group_uuid : null);
@@ -18,6 +20,12 @@ function do_action($body) {
     }
 
     $database = new database;
+
+    // This writes dialplans into every member domain, so the caller has to be one
+    // of them (or the group's creator) before any of it runs.
+    if (!branch_domain_is_related($database, $group_uuid, $caller)) {
+        return branch_not_related_error();
+    }
 
     // Get branch group
     $group = $database->select(
@@ -115,7 +123,7 @@ function do_action($body) {
             "dialplan_order" => "310",
             "dialplan_description" => "Auto-generated inter-branch routing for " . $group['branch_group_name'],
             "dialplan_xml" => $xml,
-            "insert_user" => $domain_uuid
+            "insert_user" => $caller
         );
 
         try {

@@ -1,9 +1,11 @@
 <?php
 
+require_once dirname(__FILE__) . '/branch-scope.php';
+
 $required_params = array("branchGroupUuid");
 
 function do_action($body) {
-    global $domain_uuid;
+    $caller = branch_caller_domain($body);
 
     $group_uuid = isset($body->branchGroupUuid) ? $body->branchGroupUuid :
                   (isset($body->branch_group_uuid) ? $body->branch_group_uuid : null);
@@ -14,18 +16,15 @@ function do_action($body) {
 
     $database = new database;
 
-    // Check exists
-    $existing = $database->select(
-        "SELECT branch_group_uuid FROM v_branch_groups WHERE branch_group_uuid = :uuid",
-        array("uuid" => $group_uuid), "row"
-    );
-    if (empty($existing)) {
-        return array("success" => false, "error" => "Branch group not found");
+    // Must be a group the caller is related to. This also covers the group not
+    // existing, and answers the same way, so the reply reveals no uuids.
+    if (!branch_domain_is_related($database, $group_uuid, $caller)) {
+        return branch_not_related_error();
     }
 
     // Build dynamic update
     $updates = array();
-    $params = array("uuid" => $group_uuid, "update_user" => $domain_uuid);
+    $params = array("uuid" => $group_uuid, "update_user" => $caller);
 
     $field_map = array(
         "branchGroupName" => "branch_group_name",
