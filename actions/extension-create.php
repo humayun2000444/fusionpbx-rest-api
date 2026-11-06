@@ -348,6 +348,44 @@ function do_action($body) {
     if ($voicemail_enabled === 'true' || $voicemail_enabled === true) {
         $voicemail_id = !empty($number_alias) ? $number_alias : $extension;
 
+        // Reuse a mailbox that already has this number, as extension_edit.php does.
+        // A box outlives its extension whenever the extension is deleted with the
+        // GUI's plain "Delete" (only "Delete extension + voicemail" removes it), so
+        // re-creating the extension found it waiting. This handler used to insert a
+        // second row with the same voicemail_id regardless, which left two boxes
+        // "100" in one domain (BTCL pbx-jhr-1466 100, pbx-raven-1361 101); the
+        // voicemail Lua selects by voicemail_id with no ORDER BY, so messages could
+        // land in either. Updating the existing row keeps its messages and greetings
+        // and applies this request's settings, the same fields the GUI overwrites.
+        $existing_vm = $database->select(
+            "SELECT voicemail_uuid FROM v_voicemails
+             WHERE voicemail_id = :voicemail_id AND domain_uuid = :domain_uuid
+             ORDER BY insert_date LIMIT 1",
+            array("voicemail_id" => $voicemail_id, "domain_uuid" => $db_domain_uuid), "row"
+        );
+    }
+    if (($voicemail_enabled === 'true' || $voicemail_enabled === true) && !empty($existing_vm['voicemail_uuid'])) {
+        $voicemail_uuid = $existing_vm['voicemail_uuid'];
+        $database->execute(
+            "UPDATE v_voicemails SET
+                voicemail_password = :voicemail_password,
+                voicemail_mail_to = :voicemail_mail_to,
+                voicemail_file = :voicemail_file,
+                voicemail_local_after_email = :voicemail_local_after_email,
+                voicemail_enabled = 'true',
+                voicemail_description = :voicemail_description,
+                update_date = NOW()
+             WHERE voicemail_uuid = :voicemail_uuid",
+            array(
+                "voicemail_password" => $voicemail_password,
+                "voicemail_mail_to" => !empty($voicemail_mail_to) ? $voicemail_mail_to : null,
+                "voicemail_file" => $voicemail_file,
+                "voicemail_local_after_email" => $voicemail_local_after_email,
+                "voicemail_description" => !empty($description) ? $description : null,
+                "voicemail_uuid" => $voicemail_uuid
+            )
+        );
+    } elseif ($voicemail_enabled === 'true' || $voicemail_enabled === true) {
         // Build dynamic voicemail SQL with only non-null values
         $vm_columns = array("voicemail_uuid", "domain_uuid", "voicemail_id", "voicemail_password",
                            "voicemail_file", "voicemail_local_after_email", "voicemail_enabled", "insert_date");
