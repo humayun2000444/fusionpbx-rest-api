@@ -228,3 +228,11 @@ arrivals equal to its import rate, 400 passes:
 
 4 shards with files arriving throughout: 13,400 created, 13,400 imported
 exactly once, each by its own shard.
+
+## Follow me to an outside number (FreeSWITCH script, not a patch file)
+
+`/usr/share/freeswitch/scripts/app/follow_me/index.lua` is replaced, not patched,
+because CCL's two nodes ran different versions. See
+`jobs/follow-me-caller-id/README.md`. It is installed with `install.sh` there,
+which keeps a backup. A FusionPBX upgrade that re-copies the switch scripts
+overwrites it; run `install.sh` again afterwards.
