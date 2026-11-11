@@ -104,17 +104,22 @@ function do_action($body) {
             ));
             $order += 10;
 
+            // Every time row (wday here, the time condition below) carries break=never,
+            // exactly as app/time_conditions/time_condition_edit.php writes it. The
+            // FreeSWITCH default is break=on-false: a time check that fails would end the
+            // whole extension, so later groups and the group-999 default route would never
+            // run - every call outside the first group's hours fell through.
             // Day of week condition. Never on the default route.
             if (!$is_default && isset($cond->dayOfWeek) && $cond->dayOfWeek !== '') {
                 $detail_uuid = uuid();
                 $sql_dow = "INSERT INTO v_dialplan_details (
                     dialplan_detail_uuid, domain_uuid, dialplan_uuid, dialplan_detail_tag,
                     dialplan_detail_type, dialplan_detail_data, dialplan_detail_order, dialplan_detail_group,
-                    dialplan_detail_enabled
+                    dialplan_detail_enabled, dialplan_detail_break
                 ) VALUES (
                     :detail_uuid, :domain_uuid, :dialplan_uuid, 'condition',
                     'wday', :pattern, :detail_order, :detail_group,
-                    'true'
+                    'true', 'never'
                 )";
                 $database->execute($sql_dow, array(
                     "detail_uuid" => $detail_uuid,
@@ -133,11 +138,11 @@ function do_action($body) {
                 $sql_time = "INSERT INTO v_dialplan_details (
                     dialplan_detail_uuid, domain_uuid, dialplan_uuid, dialplan_detail_tag,
                     dialplan_detail_type, dialplan_detail_data, dialplan_detail_order, dialplan_detail_group,
-                    dialplan_detail_enabled
+                    dialplan_detail_enabled, dialplan_detail_break
                 ) VALUES (
                     :detail_uuid, :domain_uuid, :dialplan_uuid, 'condition',
                     :time_type, :time_value, :detail_order, :detail_group,
-                    'true'
+                    'true', 'never'
                 )";
                 $database->execute($sql_time, array(
                     "detail_uuid" => $detail_uuid,
