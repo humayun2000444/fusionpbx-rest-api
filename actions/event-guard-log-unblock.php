@@ -1,151 +1,189 @@
 <?php
 /**
  * event-guard-log-unblock.php
- * Unblock an IP - does both:
- *   1. Sets log_status to 'pending' and sends ESL event (FusionPBX daemon flow)
- *   2. Directly removes iptables rules as a fallback if daemon is slow
+ *
+ * Unblock an address that Event Guard blocked.
  *
  * Parameters:
- *   event_guard_log_uuid - UUID of the log entry to unblock
- *   ip_address           - (alternative) IP address to unblock directly
+ *   event_guard_log_uuid - the log entry to unblock
+ *   ip_address           - (alternative) the address: every entry of it still 'blocked'
+ *
+ * Either way, every entry of that address still 'blocked' on this host is unblocked
+ * with it, so the address is cleared from both chains (sip-auth-fail, sip-auth-ip),
+ * not just the one row that was clicked.
+ *
+ * Who removes the firewall rule
+ * -----------------------------
+ * Only root can delete an iptables rule, and php-fpm runs this action as www-data.
+ * The Event Guard service (app/event_guard/resources/service/event_guard.php) runs as
+ * root and removes the rule. This action follows the same steps as the FusionPBX
+ * GUI:
+ *
+ *   1. set the log rows to 'pending';
+ *   2. send CUSTOM event_guard:unblock;
+ *   3. the service removes the rule of every 'pending' row for its host, then marks
+ *      those rows 'unblocked' itself.
+ *
+ * Until 2026-11-12 this action also marked the rows 'unblocked' itself, right after
+ * step 2, whether or not anything had been removed (its own iptables call always
+ * fails as www-data). The service reads its queue only when the event reaches it.
+ * On a busy box that usually came after the overwrite, so it found nothing pending,
+ * the rule stayed, and every UI showed "unblocked". BTCL had 191 addresses in that
+ * state (jobs/event-guard-sweep.php clears them).
+ *
+ * Now only the service marks a row 'unblocked'. The action waits a few seconds and
+ * reports what actually happened:
+ *   logStatus 'unblocked' - the service has removed the rule;
+ *   logStatus 'pending'   - the service has not finished yet, and will on its own.
  */
 
 $required_params = array();
 
-function do_action($body) {
-    $log_uuid = isset($body->event_guard_log_uuid) ? $body->event_guard_log_uuid : null;
-    $ip_address = isset($body->ip_address) ? $body->ip_address : null;
+if (!function_exists('event_guard_unblock_send_event')) {
 
-    if (empty($log_uuid) && empty($ip_address)) {
+    // Send CUSTOM event_guard:unblock to FreeSWITCH. True when it was accepted.
+    function event_guard_unblock_send_event() {
+        if (!class_exists('event_socket')) {
+            return false;
+        }
+        $cmd = "sendevent CUSTOM\nEvent-Name: CUSTOM\nEvent-Subclass: event_guard:unblock";
+        try {
+            $reply = event_socket::command($cmd);
+        }
+        catch (\Throwable $e) {
+            return false;
+        }
+        if ($reply === false || $reply === null) {
+            return false;
+        }
+        // A command reply comes back as its headers; anything else as a string.
+        $text = is_array($reply) ? (isset($reply['Reply-Text']) ? (string) $reply['Reply-Text'] : '') : (string) $reply;
+        return strpos($text, '-ERR') === false;
+    }
+
+    // Where each row stands, by uuid: 'pending', 'done' (unblocked since $since), or
+    // its plain status when neither (the 'pending' write did not land).
+    function event_guard_unblock_states($database, $uuids, $since) {
+        $params = array('since' => $since);
+        $names = array();
+        foreach (array_values($uuids) as $i => $uuid) {
+            $params['u' . $i] = $uuid;
+            $names[] = ':u' . $i;
+        }
+        $sql = "SELECT event_guard_log_uuid, log_status, "
+             . "CASE WHEN update_date >= CAST(:since AS timestamptz) THEN 1 ELSE 0 END AS fresh "
+             . "FROM v_event_guard_logs WHERE event_guard_log_uuid IN (" . implode(', ', $names) . ")";
+        $rows = $database->select($sql, $params, 'all');
+        $states = array();
+        if (is_array($rows)) {
+            foreach ($rows as $row) {
+                $status = (string) $row['log_status'];
+                if ($status === 'unblocked' && intval($row['fresh']) === 1) {
+                    $status = 'done';
+                }
+                $states[(string) $row['event_guard_log_uuid']] = $status;
+            }
+        }
+        return $states;
+    }
+}
+
+function do_action($body) {
+    $log_uuid = isset($body->event_guard_log_uuid) ? trim((string) $body->event_guard_log_uuid) : '';
+    $ip_address = isset($body->ip_address) ? trim((string) $body->ip_address) : '';
+
+    if ($log_uuid === '' && $ip_address === '') {
         return ['error' => 'event_guard_log_uuid or ip_address is required'];
     }
 
-    $uuids_to_update = [];
-    $filter = 'sip-auth-fail';
+    $database = new database;
+    $hostname = gethostname();
+    $uuids = [];
 
-    if (!empty($log_uuid)) {
-        $sql = "SELECT event_guard_log_uuid, ip_address, filter, log_status FROM v_event_guard_logs WHERE event_guard_log_uuid = :uuid";
-        $database = new database;
+    if ($log_uuid !== '') {
+        if (function_exists('is_uuid') && !is_uuid($log_uuid)) {
+            return ['error' => 'Invalid event_guard_log_uuid'];
+        }
+        $sql = "SELECT event_guard_log_uuid, ip_address FROM v_event_guard_logs WHERE event_guard_log_uuid = :uuid";
         $row = $database->select($sql, ['uuid' => $log_uuid], 'row');
-
         if (!$row) {
             return ['error' => 'Log entry not found'];
         }
-
-        $ip_address = $row['ip_address'];
-        $filter = $row['filter'];
-        $uuids_to_update[] = $log_uuid;
-    } else {
-        $sql = "SELECT event_guard_log_uuid, filter FROM v_event_guard_logs WHERE ip_address = :ip AND log_status = 'blocked' ORDER BY log_date DESC";
-        $database = new database;
-        $rows = $database->select($sql, ['ip' => $ip_address], 'all');
-        if ($rows && is_array($rows)) {
-            foreach ($rows as $r) {
-                $uuids_to_update[] = $r['event_guard_log_uuid'];
-                $filter = $r['filter'];
-            }
-        }
+        $uuids[] = (string) $row['event_guard_log_uuid'];
+        $ip_address = (string) $row['ip_address'];
+    }
+    elseif (!filter_var($ip_address, FILTER_VALIDATE_IP)) {
+        return ['error' => 'Invalid ip_address'];
     }
 
-    if (empty($uuids_to_update)) {
+    // Every entry of the address still 'blocked' on this host goes with it.
+    $sql = "SELECT event_guard_log_uuid FROM v_event_guard_logs "
+         . "WHERE ip_address = :ip AND log_status = 'blocked' AND hostname = :hostname";
+    $rows = $database->select($sql, ['ip' => $ip_address, 'hostname' => $hostname], 'all');
+    if (is_array($rows)) {
+        foreach ($rows as $r) {
+            $uuids[] = (string) $r['event_guard_log_uuid'];
+        }
+    }
+    $uuids = array_values(array_unique($uuids));
+
+    if (empty($uuids)) {
         return ['error' => 'No blocked entries found'];
     }
 
-    // Step 1: Set log_status to 'pending' via FusionPBX database class
+    // Step 1: hand the rows to the Event Guard service.
+    $since = (string) $database->select("SELECT CAST(now() AS text)", null, 'column');
+
     $p = permissions::new();
     $p->add('event_guard_log_edit', 'temp');
-
     $array = [];
-    $x = 0;
-    foreach ($uuids_to_update as $uuid) {
+    foreach ($uuids as $x => $uuid) {
         $array['event_guard_logs'][$x]['event_guard_log_uuid'] = $uuid;
         $array['event_guard_logs'][$x]['log_status'] = 'pending';
-        $x++;
     }
-
-    $database = new database;
     $database->app_name = 'event_guard';
     $database->app_uuid = 'c5b86612-1514-40cb-8e2c-3f01a8f6f637';
     $database->save($array, false);
-
     $p->delete('event_guard_log_edit', 'temp');
 
-    // Step 2: Send ESL event for daemon
-    $esl_sent = false;
-    if (class_exists('event_socket')) {
-        $esl = event_socket::create();
-        if ($esl) {
-            $cmd = "sendevent CUSTOM\nEvent-Name: CUSTOM\nEvent-Subclass: event_guard:unblock";
-            $switch_result = event_socket::command($cmd);
-            $esl_sent = true;
+    // The save can be refused without an error, so check it landed.
+    foreach (event_guard_unblock_states($database, $uuids, $since) as $state) {
+        if ($state !== 'pending' && $state !== 'done') {
+            return ['error' => 'Could not queue the unblock (the log entries were not updated)'];
         }
     }
 
-    // Step 3: Directly remove iptables rules as fallback
-    $firewall_removed = false;
-    if (!empty($ip_address) && filter_var($ip_address, FILTER_VALIDATE_IP)) {
-        $firewall_path = file_exists('/usr/sbin/iptables') ? '/usr/sbin' : (file_exists('/sbin/iptables') ? '/sbin' : '');
-        if (!empty($firewall_path)) {
-            // Check both chains: sip-auth-ip and sip-auth-fail
-            $chains = ['sip-auth-ip', 'sip-auth-fail'];
-            foreach ($chains as $chain) {
-                // Delete by rule spec, in a loop, rather than by line number.
-                //
-                // Two ways the line-number lookup silently did nothing while
-                // the log was still marked unblocked, leaving the caller
-                // firewalled and unable to register:
-                //
-                //   1. an address usually has MORE THAN ONE rule - event_guard
-                //      blocks on every failed auth - so the grep returned
-                //      several lines, is_numeric() was false, and nothing was
-                //      deleted at all. Seen live with 12 duplicates on one IP.
-                //   2. blocks are inserted with -I, at position 1, renumbering
-                //      everything below, so a number read a moment earlier can
-                //      delete a different address's rule.
-                //
-                // -C reports when there is nothing left to remove.
-                $spec = ' ' . escapeshellarg($chain) . ' -s ' . escapeshellarg($ip_address) . ' -j DROP';
-                for ($i = 0; $i < 50; $i++) {
-                    $out = array(); $present = 1;
-                    exec($firewall_path . '/iptables -C' . $spec . ' 2>/dev/null', $out, $present);
-                    if ($present !== 0) { break; }
-                    $out = array(); $rc = 1;
-                    exec($firewall_path . '/iptables -D' . $spec . ' 2>/dev/null', $out, $rc);
-                    if ($rc !== 0) { break; }
-                    $firewall_removed = true;
-                }
-            }
+    // Step 2: wake the service. It only looks at its queue when this event arrives.
+    $esl_sent = event_guard_unblock_send_event();
+
+    // Step 3: give it a few seconds, then report what it actually did.
+    $states = event_guard_unblock_states($database, $uuids, $since);
+    if ($esl_sent) {
+        $deadline = microtime(true) + 6;
+        while (in_array('pending', $states, true) && microtime(true) < $deadline) {
+            usleep(250000);
+            $states = event_guard_unblock_states($database, $uuids, $since);
         }
+    }
+    $done = !empty($states) && count(array_filter($states, function ($s) { return $s !== 'done'; })) === 0;
 
-        // Also update status to 'unblocked' directly since we removed the rule
-        if ($firewall_removed || !$firewall_removed) {
-            $p2 = permissions::new();
-            $p2->add('event_guard_log_edit', 'temp');
-
-            $array2 = [];
-            $x = 0;
-            foreach ($uuids_to_update as $uuid) {
-                $array2['event_guard_logs'][$x]['event_guard_log_uuid'] = $uuid;
-                $array2['event_guard_logs'][$x]['log_status'] = 'unblocked';
-                $array2['event_guard_logs'][$x]['log_date'] = 'now()';
-                $x++;
-            }
-
-            $database2 = new database;
-            $database2->app_name = 'event_guard';
-            $database2->app_uuid = 'c5b86612-1514-40cb-8e2c-3f01a8f6f637';
-            $database2->save($array2, false);
-
-            $p2->delete('event_guard_log_edit', 'temp');
-        }
+    if ($done) {
+        $message = 'Unblocked: the Event Guard service removed the firewall rule.';
+    }
+    elseif ($esl_sent) {
+        $message = 'Queued: the Event Guard service has not finished yet and will remove the firewall rule on its own.';
+    }
+    else {
+        $message = 'Queued, but the Event Guard service could not be reached; the address stays blocked until the service handles its next unblock request.';
     }
 
     return [
         'status' => 'success',
         'ipAddress' => $ip_address,
-        'logStatus' => 'unblocked',
+        'logStatus' => $done ? 'unblocked' : 'pending',
         'eslEventSent' => $esl_sent,
-        'firewallRemoved' => $firewall_removed,
-        'entriesUpdated' => count($uuids_to_update)
+        'firewallRemoved' => $done,
+        'entriesUpdated' => count($uuids),
+        'message' => $message,
     ];
 }
