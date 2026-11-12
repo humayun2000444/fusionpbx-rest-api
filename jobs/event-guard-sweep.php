@@ -24,8 +24,12 @@
  * and lets the Event Guard service remove the rules and mark the rows 'unblocked'.
  * Then it reads the firewall again and reports every rule that is still there.
  *
- * A rule with no row for its address and chain is reported and left alone: the
- * service only removes what a row points at.
+ * Also reported and left alone:
+ * - a rule with no row for its address and chain: the service only removes what a
+ *   row points at;
+ * - an address whose rows show a SIP attack tool as the user agent (SipSlaughter,
+ *   friendly-scanner, sipvicious, ...). Unblocking one in the UI was a slip; the
+ *   Unblock button still works for anyone who really means it.
  *
  * FUSIONPBX_ROOT overrides the FusionPBX directory (for running a copy of this
  * file from outside app/rest_api/jobs).
@@ -46,6 +50,7 @@ require_once $fusionpbx_root . '/resources/require.php';
 require_once dirname(__DIR__) . '/actions/event-guard-log-unblock.php';
 
 const EGS_CHAINS = array('sip-auth-fail', 'sip-auth-ip');
+const EGS_ATTACK_UA = '/sipslaughter|friendly-scanner|sipvicious|sipcli|vaxsipuseragent|pplsip|sundayddr|sip-scan|sipsak/i';
 
 function egs_iptables() {
     foreach (array('/usr/sbin/iptables', '/sbin/iptables') as $path) {
@@ -94,8 +99,16 @@ function egs_plan($database) {
     $plan = array();
     $skipped = array();
     $orphans = array();
+    $tools = array();
     foreach ($by_ip as $ip => $list) {
         $statuses = array_values(array_unique(array_map('strval', array_column($list, 'log_status'))));
+        $attack = '';
+        foreach ($list as $r) {
+            if (preg_match(EGS_ATTACK_UA, (string) $r['user_agent'])) {
+                $attack = (string) $r['user_agent'];
+                break;
+            }
+        }
         foreach (EGS_CHAINS as $chain) {
             if (empty($rules[$chain][$ip])) {
                 continue;
@@ -104,6 +117,10 @@ function egs_plan($database) {
                 if (in_array('unblocked', $statuses, true)) {
                     $skipped[] = array('ip' => $ip, 'chain' => $chain, 'statuses' => implode(',', $statuses));
                 }
+                continue;
+            }
+            if ($attack !== '') {
+                $tools[] = array('ip' => $ip, 'chain' => $chain, 'user_agent' => $attack);
                 continue;
             }
             $row = null;
@@ -132,7 +149,7 @@ function egs_plan($database) {
     $pending = (int) $database->select(
         "select count(*) from v_event_guard_logs where hostname = :h and log_status = 'pending'",
         array('h' => gethostname()), 'column');
-    return array($plan, $skipped, $orphans, $pending);
+    return array($plan, $skipped, $orphans, $pending, $tools);
 }
 
 function egs_plan_id($plan) {
@@ -144,7 +161,7 @@ function egs_plan_id($plan) {
     return substr(sha1(json_encode($key)), 0, 12);
 }
 
-function egs_print($plan, $skipped, $orphans, $pending) {
+function egs_print($plan, $skipped, $orphans, $pending, $tools) {
     $addresses = count(array_unique(array_column($plan, 'ip')));
     $rules = array_sum(array_column($plan, 'rules'));
     echo "host " . gethostname() . ": $addresses stuck address(es), " . count($plan) . " chain entr(ies), $rules rule(s) to clear\n";
@@ -159,6 +176,10 @@ function egs_print($plan, $skipped, $orphans, $pending) {
     echo "left alone, rule with no row for its chain: " . count($orphans) . "\n";
     foreach ($orphans as $o) {
         echo "  {$o['ip']} {$o['chain']}\n";
+    }
+    echo "left alone, SIP attack tool: " . count($tools) . "\n";
+    foreach ($tools as $t) {
+        echo "  {$t['ip']} {$t['chain']} ({$t['user_agent']})\n";
     }
     echo "rows already pending (the service handles them too): $pending\n";
 }
@@ -176,7 +197,7 @@ function egs_count_pending($database, $uuids) {
 }
 
 function egs_apply($database, $plan_id) {
-    list($plan, $skipped, $orphans, $pending) = egs_plan($database);
+    list($plan) = egs_plan($database);
     if (egs_plan_id($plan) !== $plan_id) {
         fwrite(STDERR, "ABORT: the plan is now " . egs_plan_id($plan) . ", not $plan_id. Run plan again and review it.\n");
         exit(1);
@@ -312,8 +333,8 @@ if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) {
 $database = new database;
 switch ($argv[1] ?? '') {
     case 'plan':
-        list($plan, $skipped, $orphans, $pending) = egs_plan($database);
-        egs_print($plan, $skipped, $orphans, $pending);
+        list($plan, $skipped, $orphans, $pending, $tools) = egs_plan($database);
+        egs_print($plan, $skipped, $orphans, $pending, $tools);
         echo "plan " . egs_plan_id($plan) . ". Apply with: php " . __FILE__ . " apply " . egs_plan_id($plan) . "\n";
         exit(0);
     case 'apply':
